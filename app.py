@@ -46,6 +46,8 @@ from modules.exception_classes import ( ReconnectLimitExceededError,
                                         BaseArbitrageCalcException,
                                         InsufficientOrderBookVolumeError)
 
+# Пока делаем сисему заточенную на работу только с двумя биржами. Если все будет ок - будем немного менять архитектуру и масштабировать
+
 # === Инициализация ===
 
 task_manager = TaskManager()
@@ -132,6 +134,10 @@ class Arbitr:
         self.ex_2_min_amt = None
         self.ex_2_min_cost = None
 
+        self.orderbook_queue = asyncio.Queue()                      # Очередь для watch_orderbook
+        self.spread_queue_dict = {}                                 # Словарь хранения данных для таблицы спредов
+        self.queue_pair_spread = self.__class__.queue_pair_spread   # Очередь отправки данных таблицы из экземпляров в arb_data_to_tkgrid
+
 
 
     # Метод запроса цен заданного символа
@@ -194,6 +200,7 @@ class Arbitr:
 
                     orderbook = await exchange.watchOrderBook(self.symbol)
 
+                    # сбрасываем счётчик после успешного получения
                     reconnect_attempts = 0
                     ticks_total += 1
                     count += 1
@@ -202,63 +209,142 @@ class Arbitr:
                     if not isinstance(orderbook, dict) or len(orderbook) == 0 or 'asks' not in orderbook or 'bids' not in orderbook:
                         raise InvalidOrEmptyOrderBookError(exchange_id=exchange_id, symbol=self.symbol, orderbook_data=orderbook)
 
-                    # сбрасываем счётчик после успешного получения
-                    reconnect_attempts = 0
-
-
                     if exchange.id == self.exchange_id_1:
-                        type(self).ex_1_orderbook_get_data_count += 1
-                        counted_flag_ex_1 = True
+                        type(self).ex_1_orderbook_get_data_count += 1   # Инкрементируем счетчик получения стаканов
+                        counted_flag_ex_1 = True                        # Определяем какой из бирж принадлежит стакан
                     if exchange.id == self.exchange_id_2:
-                        type(self).ex_2_orderbook_get_data_count += 1
-                        counted_flag_ex_2 = True
+                        type(self).ex_2_orderbook_get_data_count += 1   # Инкрементируем счетчик получения стаканов
+                        counted_flag_ex_2 = True                        # Определяем какой из бирж принадлежит стакан
 
-                    await self.queue_orderbook.put((symbol, orderbook))
-                    await asyncio.sleep(0.01)
+                    # Обрезаем стакан для анализа
+                    depth = min(10, len(orderbook['asks']), len(orderbook['bids']))
+                    new_ask = tuple(map(tuple, orderbook['asks'][:depth]))
+                    new_bid = tuple(map(tuple, orderbook['bids'][:depth]))
+
+                    if new_ask != old_ask or new_bid != old_bid:
+                        ticks_changed += 1
+                        new_count += 1
+
+                        try:
+                            average_ask = get_average_orderbook_price(
+                                data=orderbook['asks'],
+                                money=min_usdt,
+                                is_ask=True,
+                                log=True,
+                                exchange=exchange_id,
+                                symbol=self.symbol
+                            )
+
+                            average_bid = get_average_orderbook_price(
+                                data=orderbook['bids'],
+                                money=min_usdt,
+                                is_ask=False,
+                                log=True,
+                                exchange=exchange_id,
+                                symbol=self.symbol
+                            )
+
+
+                        except InsufficientOrderBookVolumeError as e:
+                            cprint.warning(f"[SKIP] Недостаточный объём стакана для {self.symbol} биржи {exchange_id}: {e}")
+                            await asyncio.sleep(0)  # чтобы не перегружать цикл
+                            self.__class__.orderbook_socket_enable_dict[self.symbol] = False
+                            await self.orderbook_queue.put({
+                                "closed_error": True,
+                                "symbol": self.symbol,   # Если биржа 1 - закрываем сокет биржи 2,
+                                "exchange": exchange_id,
+                                "reason": "insufficient_liquidity"
+                                })
+                            continue
+
+                        if average_ask is None or average_bid is None:
+                            await asyncio.sleep(0)
+                            continue
+
+                        await self.orderbook_queue.put({
+                            "type": "orderbook_update",
+                            "ts": time.monotonic(),
+                            "symbol": self.symbol,
+                            "count": count,
+                            "new_count": new_count,
+                            "average_ask": average_ask,
+                            "average_bid": average_bid,
+                            "closed_error": False,
+                        })
+
+                        old_ask = new_ask
+                        old_bid = new_bid
+
+                    # ---------- окно 10 секунд ----------
+                    now = time.monotonic()
+                    if now - window_start_ts >= TICK_WINDOW_SEC:
+                        await self.orderbook_queue.put({
+                            "type": "tick_stats",
+                            "symbol": self.symbol,
+                            "window_sec": TICK_WINDOW_SEC,
+                            "ticks_total": ticks_total,
+                            "ticks_changed": ticks_changed,
+                            "ticks_per_sec": round(ticks_total / TICK_WINDOW_SEC, 2),
+                            "changed_per_sec": round(ticks_changed / TICK_WINDOW_SEC, 2),
+                            "ts_from": window_start_ts,
+                            "ts_to": now,
+                        })
+
+                        window_start_ts = now
+                        ticks_total = 0
+                        ticks_changed = 0
+                    # -----------------------------------
 
                 except Exception as e:
                     error_str = str(e)
-                    # Список признаков "временных" ошибок, при которых можно переподключиться
-                    transient_errors = ['1000', 'closed by remote server', 'Cannot write to closing transport',
-                                        'Connection closed', 'WebSocket is already closing', 'Transport closed',
-                                        'broken pipe', 'reset by peer', ]
+                    transient_errors = [
+                        '1000',
+                        'closed by remote server',
+                        'Cannot write to closing transport',
+                        'Connection closed',
+                        'WebSocket is already closing',
+                        'Transport closed',
+                        'broken pipe',
+                        'reset by peer',
+                    ]
 
-                    if any(phrase in error_str for phrase in transient_errors):
+                    if any(x in error_str for x in transient_errors):
                         reconnect_attempts += 1
-                        if reconnect_attempts > max_reconnect_attempts:
-                            cprint.error_w(
-                                f"[{symbol}] ❌ Превышено число переподключений ({max_reconnect_attempts}), закрываем задачу.")
-                            # ...поднимаем исключение наверх
-                            raise ReconnectLimitExceededError(exchange_id=self.exchange.id, symbol=symbol, attempts=reconnect_attempts)
 
-                        cprint.warning_b(f"[{symbol}] Временная ошибка соединения: {e}. "
-                                         f"Таймаут {4 + (2 ** reconnect_attempts)} сек, попытка {reconnect_attempts}/{max_reconnect_attempts}...")
+                        if reconnect_attempts > max_reconnect_attempts:
+                            raise ReconnectLimitExceededError(
+                                exchange_id=self.exchange.id,
+                                symbol=self.symbol,
+                                attempts=reconnect_attempts
+                            )
+
                         await asyncio.sleep(4 + (2 ** reconnect_attempts))
                         continue
 
-                    # Любая другая ошибка — критическая
-                    cprint.error_w(f"Критическая ошибка watchOrderBook [{symbol}]: {e}")
-                    break
+                    raise
 
         except asyncio.CancelledError:
             current_task = asyncio.current_task()
             cancel_source = getattr(current_task, "_cancel_context", "неизвестно")
-            cprint.success_w(f"[watch_orderbook] Задача отменена: {symbol}, источник: {cancel_source}")
+            cprint.success_w(f"[watch_orderbook] Задача отменена: {self.symbol}, источник: {cancel_source}")
             raise
 
         except Exception as e:
-            cprint.error_b(f"[watch_orderbook][FATAL] Непредвиденная ошибка для {symbol}: {e}")
+            cprint.error_b(f"[watch_orderbook][FATAL] Непредвиденная ошибка для {self.symbol}: {e}")
             raise
 
         finally:
             try:
-                if ':' in symbol:
-                    type(self).swap_orderbook_task_count -= 1
-                else:
-                    type(self).spot_orderbook_task_count -= 1
-                    # cprint.warning_b(f"[watch_orderbook][finally] Счётчик задач обновлён: {symbol}")
+                if counted_flag_ex_1:
+                    type(self).ex_1_orderbook_get_data_count -= 1
+                if counted_flag_ex_2:
+                    type(self).ex_2_orderbook_get_data_count -= 1
             except Exception as e:
-                cprint.error_b(f"[watch_orderbook][finally] Ошибка при уменьшении счётчика для {symbol}: {e}")
+                cprint.error_b(f"[watch_orderbook][finally] Ошибка при уменьшении счётчика для {self.symbol}, {exchange_id}: {e}")
+
+    async def orderbook_compare(self):
+
+
 
 async def main():
     exchange_id_1 = "okx"
