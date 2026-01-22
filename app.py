@@ -62,14 +62,16 @@ class Arbitr:
     exchange_id_1 = None
     exchange_id_2 = None
     swap_pair_data_dict = None
-    usdt_ex_1 = None
-    usdt_ex_2 = None
+    balance_usdt_dict = {}
 
-    # Переменные контроля и статистики
-    ex_1_orderbook_task_count = 0
-    ex_2_orderbook_task_count = 0
+    # # Переменные контроля и статистики
+    # ex_1_orderbook_task_count = 0
+    # ex_2_orderbook_task_count = 0
+    orderbook_task_count_dict = {}
+
     ex_1_orderbook_get_data_count = 0
     ex_2_orderbook_get_data_count = 0
+    orderbook_get_data_count_dict = {}
     orderbook_socket_enable_dict = {}  # Словарь с флагами работы ордербуков. При инициализации ордербука - создается флаг True - условие бесконечного цикла ордербука
 
     @classmethod
@@ -96,6 +98,7 @@ class Arbitr:
     def __init__(self, pair):
         # Названия пары и символа совпадают
         self.symbol = pair
+        self.balance_usdt_dict = self.__class__.balance_usdt_dict
         self.exchange_1 = self.__class__.exchange_1
         self.exchange_2 = self.__class__.exchange_2
         self.queue_orderbook = asyncio.Queue()  # Локальная очередь для отправки стаканов
@@ -149,18 +152,11 @@ class Arbitr:
         max_reconnect_attempts = 5  # лимит переподключений
         reconnect_attempts = 0
         counted_flag_ex_1 = False
-        counted_flag_ex_2 = False
-
         ex_1_orderbook_flag = False
-        ex_2_orderbook_flag = False
-
-        exchange_id = ''
-
-        min_usdt = 0
-
+        exchange_id = exchange.id
+        # min_usdt = 0
         count = 0
         new_count = 0
-
         old_ask = tuple()
         old_bid = tuple()
         new_ask = tuple()
@@ -175,12 +171,10 @@ class Arbitr:
 
         try:
             # Ожидание баланса
-            while self.__class__.usdt_ex_1 <= 0 or self.__class__.usdt_ex_2 <= 0:
+            while self.balance_usdt_dict[exchange_id] <= 0:
                 await asyncio.sleep(0.1)
 
-            # Определяем биржу
-            if exchange.id == self.exchange_id_1:
-                self.__class__.ex_1_orderbook_task_count += 1
+            self.__class__.ex_1_orderbook_task_count += 1
                 ex_1_orderbook_flag = True
                 exchange_id = self.exchange_id_1
 
@@ -343,7 +337,7 @@ class Arbitr:
                 cprint.error_b(f"[watch_orderbook][finally] Ошибка при уменьшении счётчика для {self.symbol}, {exchange_id}: {e}")
 
     async def orderbook_compare(self):
-
+        pass
 
 
 async def main():
