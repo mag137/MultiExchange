@@ -65,14 +65,15 @@ class Arbitr:
     balance_usdt_dict = {}
 
     # # Переменные контроля и статистики
-    # ex_1_orderbook_task_count = 0
-    # ex_2_orderbook_task_count = 0
-    orderbook_task_count_dict = {}
+    orderbook_task_count_dict = {} # словарь счетчика задач по биржам
 
-    ex_1_orderbook_get_data_count = 0
-    ex_2_orderbook_get_data_count = 0
+
     orderbook_get_data_count_dict = {}
-    orderbook_socket_enable_dict = {}  # Словарь с флагами работы ордербуков. При инициализации ордербука - создается флаг True - условие бесконечного цикла ордербука
+    # Словарь с флагами работы ордербуков.
+    # Словарь вида {pair:[<exchange_ids>]}
+    # При инициализации ордербука - добавляется в список id биржи
+    orderbook_socket_enable_dict = {}
+
 
     @classmethod
     async def shutdown(cls):
@@ -96,6 +97,7 @@ class Arbitr:
         cls._initialized = True
 
     def __init__(self, pair):
+        # Экземпляр биржи - это работа с арбитражным символом на двух и более биржах
         # Названия пары и символа совпадают
         self.symbol = pair
         self.balance_usdt_dict = self.__class__.balance_usdt_dict
@@ -151,8 +153,6 @@ class Arbitr:
         """
         max_reconnect_attempts = 5  # лимит переподключений
         reconnect_attempts = 0
-        counted_flag_ex_1 = False
-        ex_1_orderbook_flag = False
         exchange_id = exchange.id
         # min_usdt = 0
         count = 0
@@ -171,17 +171,12 @@ class Arbitr:
 
         try:
             # Ожидание баланса
+            # todo реализовать получение экземпляром минимального баланса бирж
             while self.balance_usdt_dict[exchange_id] <= 0:
                 await asyncio.sleep(0.1)
 
-            self.__class__.ex_1_orderbook_task_count += 1
-                ex_1_orderbook_flag = True
-                exchange_id = self.exchange_id_1
-
-            if exchange.id == self.exchange_id_2:
-                self.__class__.ex_2_orderbook_task_count += 1
-                ex_2_orderbook_flag = True
-                exchange_id = self.exchange_id_2
+            # Инкрементируем счетчик активных ордербуков целевой биржи
+            self.__class__.orderbook_task_count_dict[exchange_id] += 1
 
             self.__class__.orderbook_socket_enable_dict[self.symbol] = True
 
