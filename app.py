@@ -62,6 +62,8 @@ class Arbitr:
     exchange_id_1 = None
     exchange_id_2 = None
     swap_pair_data_dict = None
+
+    # Словарь балансов вида {exchange_id: balance_usdt}
     balance_usdt_dict = {}
 
     # # Переменные контроля и статистики
@@ -69,6 +71,7 @@ class Arbitr:
 
 
     orderbook_get_data_count_dict = {}
+
     # Словарь с флагами работы ордербуков.
     # Словарь вида {pair:[<exchange_ids>]}
     # При инициализации ордербука - добавляется в список id биржи
@@ -100,26 +103,42 @@ class Arbitr:
         # Экземпляр биржи - это работа с арбитражным символом на двух и более биржах
         # Названия пары и символа совпадают
         self.symbol = pair
-        self.balance_usdt_dict = self.__class__.balance_usdt_dict
-        self.exchange_1 = self.__class__.exchange_1
-        self.exchange_2 = self.__class__.exchange_2
-        self.queue_orderbook = asyncio.Queue()  # Локальная очередь для отправки стаканов
 
-        self.queue_pair_spread = self.__class__.queue_pair_spread  # Очередь отправки данный в таблицу спредов
-        self.spread_queue_dict = {}  # Словарь хранения данных для таблицы спредов
+        # Список бирж участвующих арбитраже данной пары
+        self.exchange_list = []
 
-        self.task_name_symbol_ex_1 = f"orderbook_{self.exchange_id_1}_{self.symbol}"  # Имена задач для получения стаканов
-        self.task_name_symbol_ex_2 = f"orderbook_{self.exchange_id_2}_{self.symbol}"  # Имена задач для получения стаканов
+        # Словарь названий задач ордербуков
+        self.task_name_symbol_dict = {}
 
-        self.fee_ex_1 = Decimal(str(self.swap_pair_data_dict.get(self.symbol, {}).get(self.exchange_id_1, {}).get('taker', None))) * Decimal('100')
-        self.fee_ex_2 = Decimal(str(self.swap_pair_data_dict.get(self.symbol, {}).get(self.exchange_id_2, {}).get('taker', None))) * Decimal('100')
-        self.commission = self.fee_ex_1 + self.fee_ex_2
+        # Словарь комиссий вида {exchange_id: fee}
+        self.fee_dict = {}
+
+        # Словарь средних цен, вида {exchange_id: {ask: average_ask}, {bid: average_bid}}
+        self.average_price_dict = {}
+
+        # Словарь с данными для арбитража, ключи - ид биржи {exchange_id: {data1: data}, {data2: data}...}
+        self.arbitrage_pair_data = {}
+
+        # Локальная очередь для отправки стаканов
+        self.queue_orderbook = asyncio.Queue()
+
+        # Очередь отправки данный в таблицу спредов
+        self.queue_pair_spread = self.__class__.queue_pair_spread
+
+        # Словарь хранения данных для таблицы спредов
+        self.spread_queue_dict = {}
+
+        # Перебираем биржи данного символа
+        for exchange_id in self.exchange_list:
+            # Имена задач для получения стаканов
+            self.task_name_symbol_dict[exchange_id] = f"orderbook_{self.exchange_id_1}_{self.symbol}"
+            # Средние цены
+            self.average_price_dict[exchange_id] = {'ask': None}
+            self.average_price_dict[exchange_id] = {'bid': None}
+            # Fee
+            self.fee_dict[exchange_id] = Decimal(str(self.swap_pair_data_dict.get(self.symbol, {}).get(self.exchange_id_1, {}).get('taker', None))) * Decimal('100')
 
         # Инициализация переменных обработки стаканов цен
-        self.ex_1_average_ask = None
-        self.ex_2_average_ask = None
-        self.ex_1_average_bid = None
-        self.ex_2_average_bid = None
         self.delta_ratios = None
         self.open_ratio = None
         self.close_ratio = None
@@ -142,8 +161,6 @@ class Arbitr:
         self.orderbook_queue = asyncio.Queue()                      # Очередь для watch_orderbook
         self.spread_queue_dict = {}                                 # Словарь хранения данных для таблицы спредов
         self.queue_pair_spread = self.__class__.queue_pair_spread   # Очередь отправки данных таблицы из экземпляров в arb_data_to_tkgrid
-
-
 
     # Метод запроса цен заданного символа
     async def watch_orderbook(self, exchange):
@@ -178,14 +195,13 @@ class Arbitr:
             # Инкрементируем счетчик активных ордербуков целевой биржи
             self.__class__.orderbook_task_count_dict[exchange_id] += 1
 
+            # Инициализируем бесконечный цикл подписки получения стаканов
             self.__class__.orderbook_socket_enable_dict[self.symbol] = True
 
+            # Цикл работает пока есть подписка
             while self.__class__.orderbook_socket_enable_dict[self.symbol]:
                 try:
-                    if ex_1_orderbook_flag:
-                        min_usdt = self.__class__.usdt_ex_1
-                    if ex_2_orderbook_flag:
-                        min_usdt = self.__class__.usdt_ex_2
+                    # Для расчета средних берем минимальный баланс трех бирж - min_usdt
 
                     orderbook = await exchange.watchOrderBook(self.symbol)
 
@@ -201,9 +217,7 @@ class Arbitr:
                     if exchange.id == self.exchange_id_1:
                         type(self).ex_1_orderbook_get_data_count += 1   # Инкрементируем счетчик получения стаканов
                         counted_flag_ex_1 = True                        # Определяем какой из бирж принадлежит стакан
-                    if exchange.id == self.exchange_id_2:
-                        type(self).ex_2_orderbook_get_data_count += 1   # Инкрементируем счетчик получения стаканов
-                        counted_flag_ex_2 = True                        # Определяем какой из бирж принадлежит стакан
+
 
                     # Обрезаем стакан для анализа
                     depth = min(10, len(orderbook['asks']), len(orderbook['bids']))
