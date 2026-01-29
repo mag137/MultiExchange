@@ -66,6 +66,9 @@ class Arbitr:
     # Словарь балансов вида {exchange_id: balance_usdt}
     balance_usdt_dict = {}
 
+    # Минимальный баланс из балансов бирж
+    min_usdt = None
+
     # # Переменные контроля и статистики
     orderbook_task_count_dict = {} # словарь счетчика задач по биржам
 
@@ -104,6 +107,9 @@ class Arbitr:
         # Названия пары и символа совпадают
         self.symbol = pair
 
+        # Минимальный баланс из балансов бирж
+        self.min_usdt = self.__class__.min_usdt
+
         # Список бирж участвующих арбитраже данной пары
         self.exchange_list = []
 
@@ -128,7 +134,10 @@ class Arbitr:
         # Словарь хранения данных для таблицы спредов
         self.spread_queue_dict = {}
 
-        # Перебираем биржи данного символа
+        # Счетчик пришедших стаканов целевого символа заданной биржи
+        self.get_ex_orderbook_data_count = {}
+
+        # Перебираем биржи данного символа для инициализации словарей
         for exchange_id in self.exchange_list:
             # Имена задач для получения стаканов
             self.task_name_symbol_dict[exchange_id] = f"orderbook_{self.exchange_id_1}_{self.symbol}"
@@ -137,6 +146,8 @@ class Arbitr:
             self.average_price_dict[exchange_id] = {'bid': None}
             # Fee
             self.fee_dict[exchange_id] = Decimal(str(self.swap_pair_data_dict.get(self.symbol, {}).get(self.exchange_id_1, {}).get('taker', None))) * Decimal('100')
+            # Счетчик пришедших стаканов целевого символа заданной биржи
+            self.get_ex_orderbook_data_count[exchange_id] = None
 
         # Инициализация переменных обработки стаканов цен
         self.delta_ratios = None
@@ -171,7 +182,6 @@ class Arbitr:
         max_reconnect_attempts = 5  # лимит переподключений
         reconnect_attempts = 0
         exchange_id = exchange.id
-        # min_usdt = 0
         count = 0
         new_count = 0
         old_ask = tuple()
@@ -189,7 +199,7 @@ class Arbitr:
         try:
             # Ожидание баланса
             # todo реализовать получение экземпляром минимального баланса бирж
-            while self.balance_usdt_dict[exchange_id] <= 0:
+            while self.balance_usdt_dict[exchange_id] <= 0 or not self.min_usdt:
                 await asyncio.sleep(0.1)
 
             # Инкрементируем счетчик активных ордербуков целевой биржи
@@ -201,8 +211,6 @@ class Arbitr:
             # Цикл работает пока есть подписка
             while self.__class__.orderbook_socket_enable_dict[self.symbol]:
                 try:
-                    # Для расчета средних берем минимальный баланс трех бирж - min_usdt
-
                     orderbook = await exchange.watchOrderBook(self.symbol)
 
                     # сбрасываем счётчик после успешного получения
@@ -214,10 +222,8 @@ class Arbitr:
                     if not isinstance(orderbook, dict) or len(orderbook) == 0 or 'asks' not in orderbook or 'bids' not in orderbook:
                         raise InvalidOrEmptyOrderBookError(exchange_id=exchange_id, symbol=self.symbol, orderbook_data=orderbook)
 
-                    if exchange.id == self.exchange_id_1:
-                        type(self).ex_1_orderbook_get_data_count += 1   # Инкрементируем счетчик получения стаканов
-                        counted_flag_ex_1 = True                        # Определяем какой из бирж принадлежит стакан
-
+                    # Инкрементируем счетчик получения стаканов
+                    self.get_ex_orderbook_data_count += 1
 
                     # Обрезаем стакан для анализа
                     depth = min(10, len(orderbook['asks']), len(orderbook['bids']))
