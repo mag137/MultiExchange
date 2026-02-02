@@ -206,10 +206,10 @@ class Arbitr:
             self.__class__.orderbook_task_count_dict[exchange_id] += 1
 
             # Инициализируем бесконечный цикл подписки получения стаканов
-            self.__class__.orderbook_socket_enable_dict[self.symbol] = True
+            self.__class__.orderbook_socket_enable_dict[exchange_id] = True
 
             # Цикл работает пока есть подписка
-            while self.__class__.orderbook_socket_enable_dict[self.symbol]:
+            while self.__class__.orderbook_socket_enable_dict[exchange_id]:
                 try:
                     orderbook = await exchange.watchOrderBook(self.symbol)
 
@@ -225,7 +225,7 @@ class Arbitr:
                     # Инкрементируем счетчик получения стаканов
                     self.get_ex_orderbook_data_count += 1
 
-                    # Обрезаем стакан для анализа
+                    # Обрезаем стакан для анализа до 10 ордеров
                     depth = min(10, len(orderbook['asks']), len(orderbook['bids']))
                     new_ask = tuple(map(tuple, orderbook['asks'][:depth]))
                     new_bid = tuple(map(tuple, orderbook['bids'][:depth]))
@@ -237,7 +237,7 @@ class Arbitr:
                         try:
                             average_ask = get_average_orderbook_price(
                                 data=orderbook['asks'],
-                                money=min_usdt,
+                                money=self.min_usdt, # Здесь используется минимальный баланс, получаемый из классного метода - минимум среди всех биржевых депозитов
                                 is_ask=True,
                                 log=True,
                                 exchange=exchange_id,
@@ -246,7 +246,7 @@ class Arbitr:
 
                             average_bid = get_average_orderbook_price(
                                 data=orderbook['bids'],
-                                money=min_usdt,
+                                money=self.min_usdt,
                                 is_ask=False,
                                 log=True,
                                 exchange=exchange_id,
@@ -258,9 +258,10 @@ class Arbitr:
                             cprint.warning(f"[SKIP] Недостаточный объём стакана для {self.symbol} биржи {exchange_id}: {e}")
                             await asyncio.sleep(0)  # чтобы не перегружать цикл
                             self.__class__.orderbook_socket_enable_dict[self.symbol] = False
+                            # Отправляем сообщение о закрытии, теоретически можно отслеживать работу вебсокетов по флагу
                             await self.orderbook_queue.put({
                                 "closed_error": True,
-                                "symbol": self.symbol,   # Если биржа 1 - закрываем сокет биржи 2,
+                                "symbol": self.symbol,
                                 "exchange": exchange_id,
                                 "reason": "insufficient_liquidity"
                                 })
