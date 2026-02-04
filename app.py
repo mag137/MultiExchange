@@ -56,7 +56,6 @@ p_manager = ProcessManager()
 
 class Arbitr:
     _initialized = False
-
     exchange_1 = None
     exchange_2 = None
     exchange_id_1 = None
@@ -353,7 +352,7 @@ class Arbitr:
 
 
 async def main():
-    exchange_id_list = ["okx", "gateio"]
+    exchange_id_list = ["phemex","okx", "gateio"]
     exchange_instance_dict = {}
     swap_pair_data_dict = {}  # {symbol:{exchange_id: <data>}}
     all_swap_symbols_set = set()
@@ -366,21 +365,17 @@ async def main():
                 ExchangeInstance(ccxt, exchange_id, log=True)
             )
             exchange_instance_dict[exchange_id] = exchange
+            print(exchange.id)
             for pair_data in exchange_instance_dict[exchange_id].spot_swap_pair_data_dict.values():
                 swap_data = pair_data["swap"]
                 if not swap_data:
                     continue
                 symbol = swap_data["symbol"]
-                print(symbol)
+                # print(symbol)
                 all_swap_symbols_set.add(symbol)
                 swap_pair_data_dict.setdefault(symbol, {})[exchange_id] = swap_data
 
-            # print('!!!!!!!!!!!!')
-            # for pair in exchange_instance_dict[exchange_id].spot_swap_pair_data_dict.keys():
-            # exchange_swap_symbols_set = exchange_instance_dict[exchange_id].spot_swap_pair_data_dict
-
-            # print(all_swap_symbols_set)
-            pprint(swap_pair_data_dict)
+            # pprint(swap_pair_data_dict)
 
         await asyncio.Event().wait()
 
