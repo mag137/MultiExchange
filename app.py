@@ -79,6 +79,10 @@ class Arbitr:
     # При инициализации ордербука - добавляется в список id биржи
     orderbook_socket_enable_dict = {}
 
+    # Словарь символов и бирж на которых они торгуются, если биржа закрывается - она удаляется из словаря
+    symbol_in_exchanges_dict = {}
+
+
 
     @classmethod
     async def shutdown(cls):
@@ -88,16 +92,13 @@ class Arbitr:
         await cls.exchange_1.close()
         await cls.exchange_2.close()
 
+    # Проброс словаря экземпляров бирж и словаря арбитражных пар бирж
     @classmethod
-    def init_arbitrage_pairs_data(cls, *, exchange_1, exchange_2, swap_pair_data_dict):
+    def init_exchanges_pairs_data(cls, *, exchange_instance_dict, swap_pair_data_dict):
         if cls._initialized:
             raise RuntimeError("Arbitr context already initialized")
 
-        cls.exchange_1 = exchange_1
-        cls.exchange_2 = exchange_2
-        cls.exchange_id_1 = exchange_1.id
-        cls.exchange_id_2 = exchange_2.id
-
+        cls.exchange_instance_dict = exchange_instance_dict
         cls.swap_pair_data_dict = swap_pair_data_dict
         cls._initialized = True
 
@@ -346,38 +347,77 @@ class Arbitr:
         finally:
             type(self).orderbook_task_count_dict[exchange_id] -= 1
 
-
     async def orderbook_compare(self):
-        pass
+        symbol = self.symbol
+        average_ask_dict = {}       # {exchange_id: average_ask}
+        average_bid_dict = {}       # {exchange_id: average_bid}
+        old_average_ask_dict = {}   # {exchange_id: average_ask}
+        old_average_bid_dict = {}   # {exchange_id: average_bid}
+        queue_message = None
+        exchanges_in_pair_list = self.__class__.swap_pair_data_dict.get(symbol, []) # Биржи на которых торгуется символ
+
+        # Создадим задачи ордербуков заданного символа на биржах из словаря
+        for exchange_id in exchanges_in_pair_list:
+            exchange = self.__class__.exchange_instance_dict[exchange_id] # Получим экземпляр биржи по ид из словаря
+            task_name = f"orderbook_{symbol}_{exchange_id}"
+            # Создаем задачи подписки на стаканы
+            self.__class__.task_manager.add_task(name=task_name, coro_func=partial(self.watch_orderbook, exchange = exchange))
+
+        while len(exchanges_in_pair_list) > 1: # Условие для бесконечного цикла - две и более бирж в списке
+            pass
 
 
 async def main():
-    exchange_id_list = ["phemex","okx", "gateio"]
-    exchange_instance_dict = {}
+    exchange_id_list = ["phemex", "okx", "gateio"]
     swap_pair_data_dict = {}  # {symbol:{exchange_id: <data>}}
     all_swap_symbols_set = set()
 
+    # noinspection PyAbstractClass
     async with AsyncExitStack() as stack:
 
-        # --- создаём экземпляры бирж ---
-        for exchange_id in exchange_id_list:
-            exchange = await stack.enter_async_context(
-                ExchangeInstance(ccxt, exchange_id, log=True)
-            )
-            exchange_instance_dict[exchange_id] = exchange
+        async def open_exchange(exchange_id):
+            return exchange_id, await stack.enter_async_context(ExchangeInstance(ccxt, exchange_id, log=True))
+
+        results = await asyncio.gather(*(open_exchange(exchange_id) for exchange_id in exchange_id_list))
+        exchange_instance_dict = dict(results)
+
+        for exchange_id, exchange in exchange_instance_dict.items():
             print(exchange.id)
-            for pair_data in exchange_instance_dict[exchange_id].spot_swap_pair_data_dict.values():
-                swap_data = pair_data["swap"]
-                if not swap_data:
-                    continue
-                symbol = swap_data["symbol"]
-                # print(symbol)
-                all_swap_symbols_set.add(symbol)
-                swap_pair_data_dict.setdefault(symbol, {})[exchange_id] = swap_data
+            for pair_data in exchange.spot_swap_pair_data_dict.values():
+                if swap_data := pair_data.get("swap"):
+                    symbol = swap_data["symbol"]
+                    all_swap_symbols_set.add(symbol)
+                    swap_pair_data_dict.setdefault(symbol, {})[exchange_id] = swap_data["symbol"]
 
-            # pprint(swap_pair_data_dict)
+        for symbol in list(swap_pair_data_dict):
+            if len(swap_pair_data_dict[symbol]) < 2:
+                swap_pair_data_dict.pop(symbol)
+        c1 = 0
+        c2 = 0
+        c3 = 0
+        for symbol in list(swap_pair_data_dict):
+            if 'gateio' in swap_pair_data_dict[symbol]:
+                c1 += 1
+            if 'phemex' in swap_pair_data_dict[symbol]:
+                c2 += 1
+            if 'okx' in swap_pair_data_dict[symbol]:
+                c3 += 1
 
-        await asyncio.Event().wait()
+
+
+        pprint (swap_pair_data_dict)
+        print(len(swap_pair_data_dict))
+        print(c1, c2, c3)
+
+        # ---- graceful shutdown ----
+
+        stop_event = asyncio.Event()
+
+        loop = asyncio.get_running_loop()
+        loop.add_signal_handler(signal.SIGINT, stop_event.set)
+        loop.add_signal_handler(signal.SIGTERM, stop_event.set)
+
+        await stop_event.wait()
 
 
 if __name__ == "__main__":
