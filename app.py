@@ -8,7 +8,6 @@ from modules.logger import LoggerFactory
 from modules.process_manager import ProcessManager
 from modules import (cprint, round_down, get_average_orderbook_price, sync_time_with_exchange)
 from modules.arbitrage_pairs import run_analytic_process_wrapper
-from modules.exchange_instance import ExchangeInstance
 from modules.test_process_value_getter import shared_values_receiver
 from modules.test_process_value_setter import string_writer_process
 from modules.TkGrid3 import run_gui_grid_process
@@ -32,6 +31,7 @@ from modules.logger import LoggerFactory
 from modules.exchange_instance import ExchangeInstance
 from modules.process_manager import ProcessManager
 from modules.task_manager import TaskManager
+from contextlib import AsyncExitStack
 from modules.ORJSON_file_manager import JsonFileManager
 from modules.telegram_bot_message_sender import TelegramMessageSender
 # from modules.TkGrid3 import TkGrid
@@ -253,7 +253,6 @@ class Arbitr:
                                 symbol=self.symbol
                             )
 
-
                         except InsufficientOrderBookVolumeError as e:
                             cprint.warning(f"[SKIP] Недостаточный объём стакана для {self.symbol} биржи {exchange_id}: {e}")
                             await asyncio.sleep(0)  # чтобы не перегружать цикл
@@ -275,6 +274,7 @@ class Arbitr:
                             "type": "orderbook_update",
                             "ts": time.monotonic(),
                             "symbol": self.symbol,
+                            "exchange": exchange_id,
                             "count": count,
                             "new_count": new_count,
                             "average_ask": average_ask,
@@ -291,6 +291,7 @@ class Arbitr:
                         await self.orderbook_queue.put({
                             "type": "tick_stats",
                             "symbol": self.symbol,
+                            "exchange": exchange_id,
                             "window_sec": TICK_WINDOW_SEC,
                             "ticks_total": ticks_total,
                             "ticks_changed": ticks_changed,
@@ -344,51 +345,44 @@ class Arbitr:
             raise
 
         finally:
-            try:
-                if counted_flag_ex_1:
-                    type(self).ex_1_orderbook_get_data_count -= 1
-                if counted_flag_ex_2:
-                    type(self).ex_2_orderbook_get_data_count -= 1
-            except Exception as e:
-                cprint.error_b(f"[watch_orderbook][finally] Ошибка при уменьшении счётчика для {self.symbol}, {exchange_id}: {e}")
+            type(self).orderbook_task_count_dict[exchange_id] -= 1
+
 
     async def orderbook_compare(self):
         pass
 
 
 async def main():
-    exchange_id_1 = "okx"
-    exchange_id_2 = "gateio"
-    swap_pair_data_dict = {}
+    exchange_id_list = ["okx", "gateio"]
+    exchange_instance_dict = {}
+    swap_pair_data_dict = {}  # {symbol:{exchange_id: <data>}}
+    all_swap_symbols_set = set()
 
-    async with (
-        ExchangeInstance(ccxt, exchange_id_1, log=True) as exchange_1,
-        ExchangeInstance(ccxt, exchange_id_2, log=True) as exchange_2,
-    ):
-        print(exchange_1.id, exchange_2.id)
+    async with AsyncExitStack() as stack:
 
-        dual_pair_list = list(exchange_1.spot_swap_pair_data_dict.keys() & exchange_2.spot_swap_pair_data_dict.keys())
-        pprint(dual_pair_list)
-        print(len(dual_pair_list))
+        # --- создаём экземпляры бирж ---
+        for exchange_id in exchange_id_list:
+            exchange = await stack.enter_async_context(
+                ExchangeInstance(ccxt, exchange_id, log=True)
+            )
+            exchange_instance_dict[exchange_id] = exchange
+            for pair_data in exchange_instance_dict[exchange_id].spot_swap_pair_data_dict.values():
+                swap_data = pair_data["swap"]
+                if not swap_data:
+                    continue
+                symbol = swap_data["symbol"]
+                print(symbol)
+                all_swap_symbols_set.add(symbol)
+                swap_pair_data_dict.setdefault(symbol, {})[exchange_id] = swap_data
 
-        for key in dual_pair_list:
-            swap_symbol = exchange_1.spot_swap_pair_data_dict[key]['swap']['symbol']
-            data_1 = exchange_1.spot_swap_pair_data_dict[key]['swap']
-            data_2 = exchange_2.spot_swap_pair_data_dict[key]['swap']
-            print(swap_symbol)
-            pprint(exchange_1.spot_swap_pair_data_dict[key]['swap'])
-            swap_pair_data_dict.setdefault(swap_symbol, {})[exchange_1.id] = data_1
-            swap_pair_data_dict.setdefault(swap_symbol, {})[exchange_2.id] = data_2
-        Arbitr.init_arbitrage_pairs_data(exchange_1=exchange_1,exchange_2=exchange_2, swap_pair_data_dict=swap_pair_data_dict)
-        pprint(swap_pair_data_dict)
+            # print('!!!!!!!!!!!!')
+            # for pair in exchange_instance_dict[exchange_id].spot_swap_pair_data_dict.keys():
+            # exchange_swap_symbols_set = exchange_instance_dict[exchange_id].spot_swap_pair_data_dict
 
+            # print(all_swap_symbols_set)
+            pprint(swap_pair_data_dict)
 
-
-        # здесь запускаются TaskManager, watch_* и т.п.
         await asyncio.Event().wait()
-
-
-
 
 
 if __name__ == "__main__":
