@@ -137,6 +137,9 @@ class Arbitr:
         # Счетчик пришедших стаканов целевого символа заданной биржи
         self.get_ex_orderbook_data_count = {}
 
+        # Словарь статистики ордербуков символа по exchange_id
+        self.exchanges_orderbook_statistic = {}
+
         # Перебираем биржи данного символа для инициализации словарей
         for exchange_id in self.exchange_list:
             # Имена задач для получения стаканов
@@ -148,6 +151,8 @@ class Arbitr:
             self.fee_dict[exchange_id] = Decimal(str(self.swap_pair_data_dict.get(self.symbol, {}).get(self.exchange_id_1, {}).get('taker', None))) * Decimal('100')
             # Счетчик пришедших стаканов целевого символа заданной биржи
             self.get_ex_orderbook_data_count[exchange_id] = None
+            # Словарь статистики
+            self.exchanges_orderbook_statistic[exchange_id] = {}
 
         # Инициализация переменных обработки стаканов цен
         self.delta_ratios = None
@@ -261,7 +266,7 @@ class Arbitr:
                             await self.orderbook_queue.put({
                                 "closed_error": True,
                                 "symbol": self.symbol,
-                                "exchange": exchange_id,
+                                "exchange_id": exchange_id,
                                 "reason": "insufficient_liquidity"
                                 })
                             continue
@@ -291,7 +296,7 @@ class Arbitr:
                         await self.orderbook_queue.put({
                             "type": "tick_stats",
                             "symbol": self.symbol,
-                            "exchange": exchange_id,
+                            "exchange_id": exchange_id,
                             "window_sec": TICK_WINDOW_SEC,
                             "ticks_total": ticks_total,
                             "ticks_changed": ticks_changed,
@@ -364,6 +369,47 @@ class Arbitr:
             self.__class__.task_manager.add_task(name=task_name, coro_func=partial(self.watch_orderbook, exchange = exchange))
 
         while len(exchanges_in_pair_list) > 1: # Условие для бесконечного цикла - две и более бирж в списке
+            orderbook_average_price_event_data = await self.orderbook_queue.get()
+
+            # Обрабока ошибки ордербука
+            if orderbook_average_price_event_data.get('closed_error'):  # Если в одном из ордербуков критическая ошибка - прекращаем арбитраж и закрываем задачи
+                error_exchange_id = orderbook_average_price_event_data.get('exchange_id')
+                cprint.info_w(f"[orderbook_compare][{symbol}] Малая ликвидность стакана [{error_exchange_id}] - закрываем вебсокет")
+
+                # Удаляем биржу из списка бирж
+                exchanges_in_pair_list = [exchanges_in_pair_list for item in exchanges_in_pair_list if item != error_exchange_id]
+
+            # Обработка пришедшего обновления стаканов
+            if orderbook_average_price_event_data.get('type') == 'orderbook_update':
+                # Инициализируем имя биржи пришедшего стакана
+                updated_exchange_id = orderbook_average_price_event_data.get('exchange_id')
+                average_ask_dict[updated_exchange_id] = orderbook_average_price_event_data.get('average_ask')
+                average_bid_dict[updated_exchange_id] = orderbook_average_price_event_data.get('average_bid')
+
+                if old_average_ask_dict[updated_exchange_id] != average_ask_dict[updated_exchange_id] \
+                    or old_average_bid_dict[updated_exchange_id] != average_bid_dict[updated_exchange_id]:
+                    old_average_ask_dict[updated_exchange_id] = average_ask_dict[updated_exchange_id]
+                    old_average_bid_dict[updated_exchange_id] = average_bid_dict[updated_exchange_id]
+
+                    # TODO Здесь код анализа обновленного стакана и сравнения
+                    # ...
+
+            # Обработка статистики прихода стаканов
+            if orderbook_average_price_event_data.get('type') == 'tick_stats':
+                statistic_exchange_id = orderbook_average_price_event_data.get('exchange_id')
+                self.exchanges_orderbook_statistic[statistic_exchange_id]['symbol'] = orderbook_average_price_event_data.get('symbol')
+                self.exchanges_orderbook_statistic[statistic_exchange_id]['window_sec'] = orderbook_average_price_event_data.get('window_sec')
+                self.exchanges_orderbook_statistic[statistic_exchange_id]['ticks_total']= orderbook_average_price_event_data.get('ticks_total')
+                self.exchanges_orderbook_statistic[statistic_exchange_id]['ticks_changed']= orderbook_average_price_event_data.get('ticks_changed')
+                self.exchanges_orderbook_statistic[statistic_exchange_id]['ticks_per_sec']= orderbook_average_price_event_data.get('ticks_per_sec')
+                self.exchanges_orderbook_statistic[statistic_exchange_id]['changed_per_sec']= orderbook_average_price_event_data.get('changed_per_sec')
+
+
+
+
+
+
+
             pass
 
 
