@@ -360,6 +360,7 @@ class Arbitr:
         old_average_bid_dict = {}   # {exchange_id: average_bid}
         queue_message = None
         exchanges_in_pair_list = self.__class__.swap_pair_data_dict.get(symbol, []) # Биржи на которых торгуется символ
+        data_to_spread_grid = False
 
         # Создадим задачи ордербуков заданного символа на биржах из словаря
         for exchange_id in exchanges_in_pair_list:
@@ -404,7 +405,23 @@ class Arbitr:
                 self.exchanges_orderbook_statistic[statistic_exchange_id]['ticks_per_sec']= orderbook_average_price_event_data.get('ticks_per_sec')
                 self.exchanges_orderbook_statistic[statistic_exchange_id]['changed_per_sec']= orderbook_average_price_event_data.get('changed_per_sec')
 
-
+            if data_to_spread_grid:
+                self.__class__.queue_spread_table.put({
+                    self.instance_id: {
+                        1: {'text': symbol},
+                        2: {'text': self.contract_size},
+                        3: {'text': self.max_open_ratio},
+                        4: {'text': self.open_ratio},
+                        5: {'text': self.max_close_ratio},
+                        6: {'text': self.close_ratio},
+                        7: {'text': self.delta_ratios},
+                        8: {'text': self.commission},
+                        9: {'text': self.spot_fee},
+                        10: {'text': self.swap_fee},
+                        11: {'text': self.spot_tick_statistic},
+                        12: {'text': self.swap_tick_statistic},
+                    }
+                })
 
 
 
