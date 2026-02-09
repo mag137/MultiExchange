@@ -75,9 +75,8 @@ class Arbitr:
     orderbook_get_data_count_dict = {}
 
     # Словарь с флагами работы ордербуков.
-    # Словарь вида {pair:[<exchange_ids>]}
     # При инициализации ордербука - добавляется в список id биржи
-    orderbook_socket_enable_dict = {}
+    orderbook_socket_enable_dict = {}   # Словарь вида {pair:[<exchange_ids>]}
 
     # Словарь символов и бирж на которых они торгуются, если биржа закрывается - она удаляется из словаря
     symbol_in_exchanges_dict = {}
@@ -131,8 +130,8 @@ class Arbitr:
         # Очередь отправки данный в таблицу спредов
         self.queue_pair_spread = self.__class__.queue_pair_spread
 
-        # Словарь хранения данных для таблицы спредов
-        self.spread_queue_dict = {}
+        # Словарь флагов бесконченого запроса ордербуков
+        self.orderbook_socket_enable_dict = {}
 
         # Счетчик пришедших стаканов целевого символа заданной биржи
         self.get_ex_orderbook_data_count = {}
@@ -211,10 +210,10 @@ class Arbitr:
             self.__class__.orderbook_task_count_dict[exchange_id] += 1
 
             # Инициализируем бесконечный цикл подписки получения стаканов
-            self.__class__.orderbook_socket_enable_dict[exchange_id] = True
+            self.__class__.orderbook_socket_enable_dict[self.symbol][exchange_id] = True
 
             # Цикл работает пока есть подписка
-            while self.__class__.orderbook_socket_enable_dict[exchange_id]:
+            while self.__class__.orderbook_socket_enable_dict[self.symbol][exchange_id]:
                 try:
                     orderbook = await exchange.watchOrderBook(self.symbol)
 
@@ -261,7 +260,7 @@ class Arbitr:
                         except InsufficientOrderBookVolumeError as e:
                             cprint.warning(f"[SKIP] Недостаточный объём стакана для {self.symbol} биржи {exchange_id}: {e}")
                             await asyncio.sleep(0)  # чтобы не перегружать цикл
-                            self.__class__.orderbook_socket_enable_dict[self.symbol] = False
+                            self.__class__.orderbook_socket_enable_dict[self.symbol][exchange_id] = False
                             # Отправляем сообщение о закрытии, теоретически можно отслеживать работу вебсокетов по флагу
                             await self.orderbook_queue.put({
                                 "closed_error": True,
@@ -279,7 +278,7 @@ class Arbitr:
                             "type": "orderbook_update",
                             "ts": time.monotonic(),
                             "symbol": self.symbol,
-                            "exchange": exchange_id,
+                            "exchange_id": exchange_id,
                             "count": count,
                             "new_count": new_count,
                             "average_ask": average_ask,
@@ -358,8 +357,13 @@ class Arbitr:
         average_bid_dict = {}       # {exchange_id: average_bid}
         old_average_ask_dict = {}   # {exchange_id: average_ask}
         old_average_bid_dict = {}   # {exchange_id: average_bid}
+        min_ask = None              # Лучший минимальный аск
+        max_bid = None              # Лучший максимальный бид
+        min_ask_exchange_id = None  # Лучшая аск биржа
+        max_bid_exchange_id = None  # Лучшая бид биржа
         queue_message = None
         exchanges_in_pair_list = self.__class__.swap_pair_data_dict.get(symbol, []) # Биржи на которых торгуется символ
+        self.orderbook_socket_enable_dict[symbol] = {}
         data_to_spread_grid = False
 
         # Создадим задачи ордербуков заданного символа на биржах из словаря
@@ -378,7 +382,10 @@ class Arbitr:
                 cprint.info_w(f"[orderbook_compare][{symbol}] Малая ликвидность стакана [{error_exchange_id}] - закрываем вебсокет")
 
                 # Удаляем биржу из списка бирж
-                exchanges_in_pair_list = [exchanges_in_pair_list for item in exchanges_in_pair_list if item != error_exchange_id]
+                exchanges_in_pair_list = set(exchanges_in_pair_list)
+                exchanges_in_pair_list = list(exchanges_in_pair_list)
+                if error_exchange_id in exchanges_in_pair_list:
+                    exchanges_in_pair_list.remove(error_exchange_id)
 
             # Обработка пришедшего обновления стаканов
             if orderbook_average_price_event_data.get('type') == 'orderbook_update':
@@ -387,13 +394,16 @@ class Arbitr:
                 average_ask_dict[updated_exchange_id] = orderbook_average_price_event_data.get('average_ask')
                 average_bid_dict[updated_exchange_id] = orderbook_average_price_event_data.get('average_bid')
 
-                if old_average_ask_dict[updated_exchange_id] != average_ask_dict[updated_exchange_id] \
-                    or old_average_bid_dict[updated_exchange_id] != average_bid_dict[updated_exchange_id]:
+                if old_average_ask_dict.get(updated_exchange_id) != average_ask_dict[updated_exchange_id] \
+                    or old_average_bid_dict.get(updated_exchange_id) != average_bid_dict[updated_exchange_id]:
                     old_average_ask_dict[updated_exchange_id] = average_ask_dict[updated_exchange_id]
                     old_average_bid_dict[updated_exchange_id] = average_bid_dict[updated_exchange_id]
 
                     # TODO Здесь код анализа обновленного стакана и сравнения
                     # ...
+                    if len(old_average_ask_dict) > 0 and len(old_average_bid_dict) > 0:
+                        min_ask_exchange_id, min_ask = min(old_average_ask_dict.items(), key=lambda item: item[1])
+                        max_bid_exchange_id, max_bid = max(old_average_bid_dict.items(), key=lambda item: item[1])
 
             # Обработка статистики прихода стаканов
             if orderbook_average_price_event_data.get('type') == 'tick_stats':
@@ -405,9 +415,11 @@ class Arbitr:
                 self.exchanges_orderbook_statistic[statistic_exchange_id]['ticks_per_sec']= orderbook_average_price_event_data.get('ticks_per_sec')
                 self.exchanges_orderbook_statistic[statistic_exchange_id]['changed_per_sec']= orderbook_average_price_event_data.get('changed_per_sec')
 
+            # Формирование словаря данных для таблицы
             if data_to_spread_grid:
                 self.__class__.queue_spread_table.put({
-                    self.instance_id: {
+                    symbol: {
+                        1: {'text': symbol},
                         1: {'text': symbol},
                         2: {'text': self.contract_size},
                         3: {'text': self.max_open_ratio},
@@ -450,7 +462,7 @@ async def main():
                 if swap_data := pair_data.get("swap"):
                     symbol = swap_data["symbol"]
                     all_swap_symbols_set.add(symbol)
-                    swap_pair_data_dict.setdefault(symbol, {})[exchange_id] = swap_data["symbol"]
+                    swap_pair_data_dict.setdefault(symbol, []).append(exchange_id)
 
         for symbol in list(swap_pair_data_dict):
             if len(swap_pair_data_dict[symbol]) < 2:
