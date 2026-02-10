@@ -442,10 +442,32 @@ class Arbitr:
             pass
 
 
+# Класс хранения данных конкретного символа на конкретной бирже - нижний класс обработки и хранения данных
+class ExchangeInstrument():
+    def __init__(self, exchange_id, swap_data):
+        fee = swap_data.get("taker")
+        self.exchange_id = exchange_id
+        self.symbol = swap_data.get("symbol")
+        self.contract_size = Decimal(str(swap_data.get("contractSize")))
+        self.tick_size = Decimal(str(swap_data.get("precision", {}).get("price", None)))
+        self.qty_step = Decimal(str(swap_data.get("precision", {}).get("amount", None)))
+        self.min_amount = Decimal(str(swap_data.get("limits", {}).get("amount", {}).get('min', None)))
+
+        if fee is None:
+            fee = swap_data.get("taker_fee")
+        self.taker_fee = fee
+
+        # Рассчитаем коэффициент размера контракта для выравнивания с наибольшим amount в списке
+        self.contract_size_ratio = None
+
+
+
+
 async def main():
     exchange_id_list = ["phemex", "okx", "gateio"]
     swap_pair_data_dict = {}  # {symbol:{exchange_id: <data>}}
     all_swap_symbols_set = set()
+    swap_pair_for_deal_info = {} # Словарь с данными для открытия сделок
 
     # noinspection PyAbstractClass
     async with AsyncExitStack() as stack:
@@ -460,9 +482,29 @@ async def main():
             print(exchange.id)
             for pair_data in exchange.spot_swap_pair_data_dict.values():
                 if swap_data := pair_data.get("swap"):
+                    if not swap_data or swap_data.get("settle") != "USDT":
+                        continue
                     symbol = swap_data["symbol"]
-                    all_swap_symbols_set.add(symbol)
-                    swap_pair_data_dict.setdefault(symbol, []).append(exchange_id)
+                    if swap_data.get('linear') and not swap_data.get('inverse'):
+                        swap_pair_data_dict.setdefault(symbol, {})[exchange_id] = swap_data
+
+
+        # pprint(swap_pair_data_dict)
+
+        # Парсинг данных для swap_pair_for_deal_info
+        for symbol, volume in swap_pair_data_dict.items():
+            # Проверим количество бирж с символом - если меньше двух - пропускаем
+            if len(swap_pair_data_dict.get(symbol)) < 2:
+                continue
+            max_contractsize = 0
+            data = swap_pair_data_dict.get(symbol)
+            for exchange_id, data in volume.items():
+                swap_pair_for_deal_info.setdefault(symbol,{})[exchange_id]['contractSize'] = data.get(exchange_id,{}).get('contractSize', None)
+
+       pprint(swap_pair_for_deal_info)
+
+
+
 
         for symbol in list(swap_pair_data_dict):
             if len(swap_pair_data_dict[symbol]) < 2:
