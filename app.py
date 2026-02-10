@@ -448,6 +448,7 @@ class ExchangeInstrument():
         fee = swap_data.get("taker")
         self.exchange_id = exchange_id
         self.symbol = swap_data.get("symbol")
+        self.balance_usdt = None
         self.contract_size = Decimal(str(swap_data.get("contractSize")))
         self.tick_size = Decimal(str(swap_data.get("precision", {}).get("price", None)))
         self.qty_step = Decimal(str(swap_data.get("precision", {}).get("amount", None)))
@@ -457,8 +458,11 @@ class ExchangeInstrument():
             fee = swap_data.get("taker_fee")
         self.taker_fee = fee
 
-        # Рассчитаем коэффициент размера контракта для выравнивания с наибольшим amount в списке
-        self.contract_size_ratio = None
+    def get_balance_usdt(self, balance_usdt):
+        self.balance_usdt = Decimal(str(balance_usdt))
+
+
+
 
 
 
