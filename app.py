@@ -177,181 +177,6 @@ class Arbitr:
         self.spread_queue_dict = {}                                 # Словарь хранения данных для таблицы спредов
         self.queue_pair_spread = self.__class__.queue_pair_spread   # Очередь отправки данных таблицы из экземпляров в arb_data_to_tkgrid
 
-    # Метод запроса цен заданного символа
-    async def watch_orderbook(self, exchange):
-        """
-        Асинхронно следит за стаканом указанного символа.
-        При превышении числа попыток — завершает задачу.
-        """
-        max_reconnect_attempts = 5  # лимит переподключений
-        reconnect_attempts = 0
-        exchange_id = exchange.id
-        count = 0
-        new_count = 0
-        old_ask = tuple()
-        old_bid = tuple()
-        new_ask = tuple()
-        new_bid = tuple()
-
-        # ---- tick stats ----
-        TICK_WINDOW_SEC = 10.0
-        window_start_ts = time.monotonic()
-        ticks_total = 0
-        ticks_changed = 0
-        # --------------------
-
-        try:
-            # Ожидание баланса
-            # todo реализовать получение экземпляром минимального баланса бирж
-            while self.balance_usdt_dict[exchange_id] <= 0 or not self.min_usdt:
-                await asyncio.sleep(0.1)
-
-            # Инкрементируем счетчик активных ордербуков целевой биржи
-            self.__class__.orderbook_task_count_dict[exchange_id] += 1
-
-            # Инициализируем бесконечный цикл подписки получения стаканов
-            self.__class__.orderbook_socket_enable_dict[self.symbol][exchange_id] = True
-
-            # Цикл работает пока есть подписка
-            while self.__class__.orderbook_socket_enable_dict[self.symbol][exchange_id]:
-                try:
-                    orderbook = await exchange.watchOrderBook(self.symbol)
-
-                    # сбрасываем счётчик после успешного получения
-                    reconnect_attempts = 0
-                    ticks_total += 1
-                    count += 1
-
-                    # Проверим пришедшие данные стаканов - если левые, то выбрасываем исключение
-                    if not isinstance(orderbook, dict) or len(orderbook) == 0 or 'asks' not in orderbook or 'bids' not in orderbook:
-                        raise InvalidOrEmptyOrderBookError(exchange_id=exchange_id, symbol=self.symbol, orderbook_data=orderbook)
-
-                    # Инкрементируем счетчик получения стаканов
-                    self.get_ex_orderbook_data_count += 1
-
-                    # Обрезаем стакан для анализа до 10 ордеров
-                    depth = min(10, len(orderbook['asks']), len(orderbook['bids']))
-                    new_ask = tuple(map(tuple, orderbook['asks'][:depth]))
-                    new_bid = tuple(map(tuple, orderbook['bids'][:depth]))
-
-                    if new_ask != old_ask or new_bid != old_bid:
-                        ticks_changed += 1
-                        new_count += 1
-
-                        try:
-                            average_ask = get_average_orderbook_price(
-                                data=orderbook['asks'],
-                                money=self.min_usdt, # Здесь используется минимальный баланс, получаемый из классного метода - минимум среди всех биржевых депозитов
-                                is_ask=True,
-                                log=True,
-                                exchange=exchange_id,
-                                symbol=self.symbol
-                            )
-
-                            average_bid = get_average_orderbook_price(
-                                data=orderbook['bids'],
-                                money=self.min_usdt,
-                                is_ask=False,
-                                log=True,
-                                exchange=exchange_id,
-                                symbol=self.symbol
-                            )
-
-                        except InsufficientOrderBookVolumeError as e:
-                            cprint.warning(f"[SKIP] Недостаточный объём стакана для {self.symbol} биржи {exchange_id}: {e}")
-                            await asyncio.sleep(0)  # чтобы не перегружать цикл
-                            self.__class__.orderbook_socket_enable_dict[self.symbol][exchange_id] = False
-                            # Отправляем сообщение о закрытии, теоретически можно отслеживать работу вебсокетов по флагу
-                            await self.orderbook_queue.put({
-                                "closed_error": True,
-                                "symbol": self.symbol,
-                                "exchange_id": exchange_id,
-                                "reason": "insufficient_liquidity"
-                                })
-                            continue
-
-                        if average_ask is None or average_bid is None:
-                            await asyncio.sleep(0)
-                            continue
-
-                        await self.orderbook_queue.put({
-                            "type": "orderbook_update",
-                            "ts": time.monotonic(),
-                            "symbol": self.symbol,
-                            "exchange_id": exchange_id,
-                            "count": count,
-                            "new_count": new_count,
-                            "average_ask": average_ask,
-                            "average_bid": average_bid,
-                            "closed_error": False,
-                        })
-
-                        old_ask = new_ask
-                        old_bid = new_bid
-
-                    # ---------- окно 10 секунд ----------
-                    now = time.monotonic()
-                    if now - window_start_ts >= TICK_WINDOW_SEC:
-                        await self.orderbook_queue.put({
-                            "type": "tick_stats",
-                            "symbol": self.symbol,
-                            "exchange_id": exchange_id,
-                            "window_sec": TICK_WINDOW_SEC,
-                            "ticks_total": ticks_total,
-                            "ticks_changed": ticks_changed,
-                            "ticks_per_sec": round(ticks_total / TICK_WINDOW_SEC, 2),
-                            "changed_per_sec": round(ticks_changed / TICK_WINDOW_SEC, 2),
-                            "ts_from": window_start_ts,
-                            "ts_to": now,
-                        })
-
-                        window_start_ts = now
-                        ticks_total = 0
-                        ticks_changed = 0
-                    # -----------------------------------
-
-                except Exception as e:
-                    error_str = str(e)
-                    transient_errors = [
-                        '1000',
-                        'closed by remote server',
-                        'Cannot write to closing transport',
-                        'Connection closed',
-                        'WebSocket is already closing',
-                        'Transport closed',
-                        'broken pipe',
-                        'reset by peer',
-                    ]
-
-                    if any(x in error_str for x in transient_errors):
-                        reconnect_attempts += 1
-
-                        if reconnect_attempts > max_reconnect_attempts:
-                            raise ReconnectLimitExceededError(
-                                exchange_id=self.exchange.id,
-                                symbol=self.symbol,
-                                attempts=reconnect_attempts
-                            )
-
-                        await asyncio.sleep(4 + (2 ** reconnect_attempts))
-                        continue
-
-                    raise
-
-        except asyncio.CancelledError:
-            current_task = asyncio.current_task()
-            cancel_source = getattr(current_task, "_cancel_context", "неизвестно")
-            cprint.success_w(f"[watch_orderbook] Задача отменена: {self.symbol}, источник: {cancel_source}")
-            raise
-
-        except Exception as e:
-            cprint.error_b(f"[watch_orderbook][FATAL] Непредвиденная ошибка для {self.symbol}: {e}")
-            raise
-
-        finally:
-            type(self).orderbook_task_count_dict[exchange_id] -= 1
-
-
     async def orderbook_compare(self):
         symbol = self.symbol
         average_ask_dict = {}       # {exchange_id: average_ask}
@@ -459,7 +284,7 @@ class ExchangeInstrument():
         fee = swap_data.get("taker")
         self.exchange = exchange
         self.exchange_id = exchange.id
-        self.queue = self.__class__.symbol_orderbooks_queue
+        self.orderbook_queue = self.__class__.symbol_orderbooks_queue
         self.symbol = None
         self.balance_usdt = ''
         self.orderbook_updating = False
@@ -467,7 +292,7 @@ class ExchangeInstrument():
         self.tick_size = ''
         self.qty_step = ''
         self.min_amount = ''
-        self.taker_fee = ''
+        self.fee = ''
         self.update_swap_data(swap_data=swap_data, balance_usdt=balance_usdt)
 
     # Метод обновления данных
@@ -482,11 +307,12 @@ class ExchangeInstrument():
         self.balance_usdt = Decimal(str(balance_usdt))
         if fee is None:
             fee = swap_data.get("taker_fee")
-        self.taker_fee = fee
+        self.fee = fee
 
     # Метод возвращения словаря статусов бесконечного цикла получения стакана
-    def get_orderbook_updating_status_dict(self, status):
-        return self.__class__.orderbook_updating_status_dict
+    @classmethod
+    def get_orderbook_updating_status_dict(cls):
+        return cls.orderbook_updating_status_dict
 
     # Метод получения стаканов заданного символа на заданной бирже
     async def watch_orderbook(self):
@@ -552,31 +378,31 @@ class ExchangeInstrument():
                         try:
                             average_ask = get_average_orderbook_price(
                                 data=orderbook['asks'],
-                                money=self.min_usdt, # Здесь используется минимальный баланс, получаемый из классного метода - минимум среди всех биржевых депозитов
+                                money=self.balance_usdt, # Здесь используется минимальный баланс, получаемый из классного метода - минимум среди всех биржевых депозитов
                                 is_ask=True,
                                 log=True,
-                                exchange=exchange_id,
+                                exchange=self.exchange_id,
                                 symbol=self.symbol
                             )
 
                             average_bid = get_average_orderbook_price(
                                 data=orderbook['bids'],
-                                money=self.min_usdt,
+                                money=self.balance_usdt,
                                 is_ask=False,
                                 log=True,
-                                exchange=exchange_id,
+                                exchange=self.exchange_id,
                                 symbol=self.symbol
                             )
 
                         except InsufficientOrderBookVolumeError as e:
-                            cprint.warning(f"[SKIP] Недостаточный объём стакана для {self.symbol} биржи {exchange_id}: {e}")
+                            cprint.warning(f"[SKIP] Недостаточный объём стакана для {self.symbol} биржи {self.exchange_id}: {e}")
                             await asyncio.sleep(0)  # чтобы не перегружать цикл
-                            self.__class__.orderbook_socket_enable_dict[self.symbol][exchange_id] = False
+                            self.__class__.orderbook_updating_status_dict[self.exchange_id][self.symbol] = False
                             # Отправляем сообщение о закрытии, теоретически можно отслеживать работу вебсокетов по флагу
                             await self.orderbook_queue.put({
                                 "closed_error": True,
                                 "symbol": self.symbol,
-                                "exchange_id": exchange_id,
+                                "exchange_id": self.exchange_id,
                                 "reason": "insufficient_liquidity"
                                 })
                             continue
@@ -589,7 +415,7 @@ class ExchangeInstrument():
                             "type": "orderbook_update",
                             "ts": time.monotonic(),
                             "symbol": self.symbol,
-                            "exchange_id": exchange_id,
+                            "exchange_id": self.exchange_id,
                             "count": count,
                             "new_count": new_count,
                             "average_ask": average_ask,
@@ -606,7 +432,7 @@ class ExchangeInstrument():
                         await self.orderbook_queue.put({
                             "type": "tick_stats",
                             "symbol": self.symbol,
-                            "exchange_id": exchange_id,
+                            "exchange_id": self.exchange_id,
                             "window_sec": TICK_WINDOW_SEC,
                             "ticks_total": ticks_total,
                             "ticks_changed": ticks_changed,
@@ -643,10 +469,8 @@ class ExchangeInstrument():
                                 symbol=self.symbol,
                                 attempts=reconnect_attempts
                             )
-
                         await asyncio.sleep(4 + (2 ** reconnect_attempts))
                         continue
-
                     raise
 
         except asyncio.CancelledError:
@@ -660,14 +484,7 @@ class ExchangeInstrument():
             raise
 
         finally:
-            type(self).orderbook_task_count_dict[exchange_id] -= 1
-
-
-
-
-
-
-
+            self.__class__.orderbook_updating_status_dict.setdefault(self.exchange_id, {})[self.symbol] = False
 
 async def main():
     exchange_id_list = ["phemex", "okx", "gateio"]
