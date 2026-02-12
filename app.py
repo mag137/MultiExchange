@@ -271,22 +271,22 @@ class Arbitr:
 # Класс хранения данных конкретного символа на конкретной бирже - нижний класс обработки и хранения данных
 # класс инициализируется на уровне экземпляра класса ArbitragePair
 class ExchangeInstrument():
-    # Словарь флагов ордербук-сокетов
+    # Словарь флагов ордербук-сокетов вида {exchange_ids:{symbol: true/false}} - по нему можно собирать статистику открытых сокетов на всех биржах
     orderbook_updating_status_dict = {}
+    # Словарь данных ордербуков для отправки в очередь вида {exchange_ids:{orderbook_data}}
+    orderbook_data_dict = {}
 
-    # Словарь счетчиков пришедших стаканов целевого символа заданной биржи
-    get_ex_orderbook_data_count = {}
-
-    # Словарь очередей данных ордербуков вида {symbol: async.Queue()}
-    symbol_orderbooks_queue = asyncio.Queue()
-
-    def __init__(self, exchange, swap_data, balance_usdt):
+    def __init__(self, exchange, symbol, swap_data, balance_usdt, orderbook_queue: asyncio.Queue, statistic_queue: asyncio.Queue = None):
+        # Словарь счетчиков пришедших стаканов целевого символа заданной биржи
+        self.get_ex_orderbook_data_count = {}
         fee = swap_data.get("taker")
         self.exchange = exchange
         self.exchange_id = exchange.id
-        self.orderbook_queue = self.__class__.symbol_orderbooks_queue
-        self.symbol = None
-        self.balance_usdt = ''
+        self.orderbook_queue = orderbook_queue # Очередь данных ордербуков, сообщений вида {exchange_id: {data_dict}}. На каждый символ своя очередь
+        self.statistic_queue = statistic_queue # Очередь отсылки статистики работы watch_orderbook
+        self.symbol = symbol
+        self.__class__.orderbook_data_dict.setdefault(symbol, {})
+        self.balance_usdt = balance_usdt
         self.orderbook_updating = False
         self.contract_size = ''
         self.tick_size = ''
@@ -298,7 +298,6 @@ class ExchangeInstrument():
     # Метод обновления данных
     def update_swap_data(self, swap_data, balance_usdt):
         fee = swap_data.get("taker")
-        self.symbol = swap_data.get("symbol")
         self.balance_usdt = None
         self.contract_size = Decimal(str(swap_data.get("contractSize")))
         self.tick_size = Decimal(str(swap_data.get("precision", {}).get("price", None)))
@@ -336,6 +335,7 @@ class ExchangeInstrument():
         ticks_total = 0
         ticks_changed = 0
         # --------------------
+        statistics_dict = {}
 
         try:
             # Ожидание баланса
@@ -347,10 +347,10 @@ class ExchangeInstrument():
             self.__class__.orderbook_updating_status_dict.setdefault(self.exchange_id, {})[self.symbol] = True
 
             # Инициализируем счетчик получения стаканов
-            self.__class__.get_ex_orderbook_data_count.setdefault(self.exchange_id, {})[self.symbol] = 0
+            self.get_ex_orderbook_data_count.setdefault(self.exchange_id, {})[self.symbol] = 0
 
             # Цикл работает пока есть подписка
-            while self.__class__.orderbook_updating_status_dict.setdefault(self.exchange_id, {})[self.symbol]:
+            while self.__class__.orderbook_updating_status_dict[self.exchange_id][self.symbol]:
                 try:
                     orderbook = await self.exchange.watchOrderBook(self.symbol)
 
@@ -364,7 +364,7 @@ class ExchangeInstrument():
                         raise InvalidOrEmptyOrderBookError(exchange_id=self.exchange_id, symbol=self.symbol, orderbook_data=orderbook)
 
                     # Инкрементируем счетчик получения стаканов
-                    self.__class__.get_ex_orderbook_data_count.setdefault(self.exchange_id, {})[self.symbol] += 1
+                    self.get_ex_orderbook_data_count.setdefault(self.exchange_id, {})[self.symbol] += 1
 
                     # Обрезаем стакан для анализа до 10 ордеров
                     depth = min(10, len(orderbook['asks']), len(orderbook['bids']))
@@ -399,19 +399,14 @@ class ExchangeInstrument():
                             await asyncio.sleep(0)  # чтобы не перегружать цикл
                             self.__class__.orderbook_updating_status_dict[self.exchange_id][self.symbol] = False
                             # Отправляем сообщение о закрытии, теоретически можно отслеживать работу вебсокетов по флагу
-                            await self.orderbook_queue.put({
-                                "closed_error": True,
-                                "symbol": self.symbol,
-                                "exchange_id": self.exchange_id,
-                                "reason": "insufficient_liquidity"
-                                })
-                            continue
+
+                            break
 
                         if average_ask is None or average_bid is None:
-                            await asyncio.sleep(0)
+                            await asyncio.sleep(1)
                             continue
 
-                        await self.orderbook_queue.put({
+                        self.__class__.orderbook_data_dict[self.symbol][self.exchange_id] = {
                             "type": "orderbook_update",
                             "ts": time.monotonic(),
                             "symbol": self.symbol,
@@ -421,31 +416,51 @@ class ExchangeInstrument():
                             "average_ask": average_ask,
                             "average_bid": average_bid,
                             "closed_error": False,
-                        })
+                        }
 
                         old_ask = new_ask
                         old_bid = new_bid
 
-                    # ---------- окно 10 секунд ----------
-                    now = time.monotonic()
-                    if now - window_start_ts >= TICK_WINDOW_SEC:
-                        await self.orderbook_queue.put({
-                            "type": "tick_stats",
-                            "symbol": self.symbol,
-                            "exchange_id": self.exchange_id,
-                            "window_sec": TICK_WINDOW_SEC,
-                            "ticks_total": ticks_total,
-                            "ticks_changed": ticks_changed,
-                            "ticks_per_sec": round(ticks_total / TICK_WINDOW_SEC, 2),
-                            "changed_per_sec": round(ticks_changed / TICK_WINDOW_SEC, 2),
-                            "ts_from": window_start_ts,
-                            "ts_to": now,
-                        })
+                        try:
+                            await self.orderbook_queue.put_nowait(self.__class__.orderbook_data_dict[self.symbol].copy())
+                        except asyncio.QueueFull:
+                            try:
+                                _ = self.orderbook_queue.get_nowait()
+                            except asyncio.QueueEmpty:
+                                pass
+                            await self.orderbook_queue.put(self.__class__.orderbook_data_dict[self.symbol].copy())
 
-                        window_start_ts = now
-                        ticks_total = 0
-                        ticks_changed = 0
-                    # -----------------------------------
+                    if self.statistic_queue:
+                        # ---------- окно 10 секунд ----------
+                        now = time.monotonic()
+                        if now - window_start_ts >= TICK_WINDOW_SEC:
+                            statistics_dict = {
+                                "type": "tick_stats",
+                                "symbol": self.symbol,
+                                "exchange_id": self.exchange_id,
+                                "window_sec": TICK_WINDOW_SEC,
+                                "ticks_total": ticks_total,
+                                "ticks_changed": ticks_changed,
+                                "ticks_per_sec": round(ticks_total / TICK_WINDOW_SEC, 2),
+                                "changed_per_sec": round(ticks_changed / TICK_WINDOW_SEC, 2),
+                                "ts_from": window_start_ts,
+                                "ts_to": now,
+                            }
+
+                            window_start_ts = now
+                            ticks_total = 0
+                            ticks_changed = 0
+                        # -----------------------------------
+                        try:
+                            await self.statistic_queue.put_nowait({self.symbol: {self.exchange_id: statistics_dict}})
+                        except asyncio.QueueFull:
+                            try:
+                                _ = self.statistic_queue.get_nowait()
+                            except asyncio.QueueEmpty:
+                                pass
+                            await self.statistic_queue.put({self.symbol: {self.exchange_id: statistics_dict}})
+
+
 
                 except Exception as e:
                     error_str = str(e)
@@ -485,6 +500,8 @@ class ExchangeInstrument():
 
         finally:
             self.__class__.orderbook_updating_status_dict.setdefault(self.exchange_id, {})[self.symbol] = False
+
+
 
 async def main():
     exchange_id_list = ["phemex", "okx", "gateio"]
