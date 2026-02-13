@@ -16,7 +16,7 @@ import itertools
 import multiprocessing
 from pprint import pprint
 import random
-
+from typing import List, Dict, Any, Optional
 import multiprocessing
 import time
 from asyncio import Queue, ALL_COMPLETED
@@ -55,51 +55,61 @@ p_manager = ProcessManager()
 
 
 class Arbitr:
-    _initialized = False
-    exchange_1 = None
-    exchange_2 = None
-    exchange_id_1 = None
-    exchange_id_2 = None
-    swap_pair_data_dict = None
+    arbitrage_obj_dict = {}
 
-    # Словарь балансов вида {exchange_id: balance_usdt}
-    balance_usdt_dict = {}
-
-    # Минимальный баланс из балансов бирж
-    min_usdt = None
-
-    # # Переменные контроля и статистики
-    orderbook_task_count_dict = {} # словарь счетчика задач по биржам
+    def __init__(self, symbol, swap_pairs_raw_data_dict, swap_pairs_processed_data_dict):
+        self.symbol = symbol
+        self.swap_pairs_raw_data_dict = swap_pairs_raw_data_dict
+        self.swap_pairs_processed_data_dict = swap_pairs_processed_data_dict
 
 
-    orderbook_get_data_count_dict = {}
-
-    # Словарь с флагами работы ордербуков.
-    # При инициализации ордербука - добавляется в список id биржи
-    orderbook_socket_enable_dict = {}   # Словарь вида {pair:[<exchange_ids>]}
-
-    # Словарь символов и бирж на которых они торгуются, если биржа закрывается - она удаляется из словаря
-    symbol_in_exchanges_dict = {}
-
-
+    # Инициализация данных списка бирж
+    @classmethod
+    def create_obj(cls, symbol: str, swap_pairs_raw_data_dict: Dict, swap_pairs_processed_data_dict: Dict):
+        return cls(symbol, swap_pairs_raw_data_dict, swap_pairs_processed_data_dict)
 
     @classmethod
-    async def shutdown(cls):
-        if not cls._initialized:
-            return
+    async def init_exchanges_pairs_data(cls, exchanges_id_list):
+        cls.swap_pairs_raw_data_dict = {}                # Словарь сырых с биржи данных для открытия сделок
+        cls.swap_pairs_processed_data_dict = {}          # Словарь распарсенных с биржи данных для открытия сделок
+        async with AsyncExitStack() as stack:
+            async def open_exchange(exchange_id):
+                return exchange_id, await stack.enter_async_context(ExchangeInstance(ccxt, exchange_id, log=True))
 
-        await cls.exchange_1.close()
-        await cls.exchange_2.close()
+            results = await asyncio.gather(*(open_exchange(exchange_id) for exchange_id in exchanges_id_list))
+            exchanges_instance_dict = dict(results)
 
-    # Проброс словаря экземпляров бирж и словаря арбитражных пар бирж
-    @classmethod
-    def init_exchanges_pairs_data(cls, *, exchange_instance_dict, swap_pair_data_dict):
-        if cls._initialized:
-            raise RuntimeError("Arbitr context already initialized")
+            for exchange_id, exchange in exchanges_instance_dict.items():
+                print(exchange.id)
+                for pair_data in exchange.spot_swap_pair_data_dict.values():
+                    if swap_data := pair_data.get("swap"):
+                        if not swap_data or swap_data.get("settle") != "USDT":
+                            continue
+                        symbol = swap_data["symbol"]
+                        if swap_data.get('linear') and not swap_data.get('inverse'):
+                            cls.swap_pairs_raw_data_dict.setdefault(symbol, {})[exchange_id] = swap_data
 
-        cls.exchange_instance_dict = exchange_instance_dict
-        cls.swap_pair_data_dict = swap_pair_data_dict
-        cls._initialized = True
+            # Парсинг данных для cls.swap_pairs_processed_data_dict
+            for symbol, volume in cls.swap_pairs_raw_data_dict.items():
+                if len(volume) < 2:
+                    continue
+                max_contract_size = 0  # Максимальный размер единичного контракта среди бирж символа
+                # объем сделки должен быть рассчитан исходя из максимального размера контрактов в группе и кратен максимальному размеру
+                for exchange_id, data in volume.items():
+                    contract_size = data.get('contractSize')
+                    if max_contract_size < contract_size:
+                        max_contract_size = contract_size
+                    cls.swap_pairs_processed_data_dict.setdefault(symbol, {}).setdefault(exchange_id, {})['contractSize'] = contract_size
+                for exchange_id, data in volume.items():
+                    cls.swap_pairs_processed_data_dict[symbol][exchange_id]['max_contractSize'] = max_contract_size
+
+            for symbol in cls.swap_pairs_processed_data_dict.keys():
+                cls.arbitrage_obj_dict[symbol]=cls.create_obj(symbol=symbol,
+                                                              swap_pairs_raw_data_dict=cls.swap_pairs_raw_data_dict,
+                                                              swap_pairs_processed_data_dict=cls.swap_pairs_processed_data_dict)
+
+            pprint(cls.swap_pairs_processed_data_dict)
+
 
     def __init__(self, pair):
         # Экземпляр биржи - это работа с арбитражным символом на двух и более биржах
@@ -266,6 +276,9 @@ class Arbitr:
 
 
             pass
+
+    @classmethod
+    async def run_analytic_process(cls):
 
 
 # Класс хранения данных конкретного символа на конкретной бирже - нижний класс обработки и хранения данных
@@ -501,17 +514,13 @@ class ExchangeInstrument():
         finally:
             self.__class__.orderbook_updating_status_dict.setdefault(self.exchange_id, {})[self.symbol] = False
 
-
-
 async def main():
     exchange_id_list = ["phemex", "okx", "gateio"]
-    swap_pair_data_dict = {}  # {symbol:{exchange_id: <data>}}
-    all_swap_symbols_set = set()
-    swap_pair_for_deal_info = {} # Словарь с данными для открытия сделок
+    swap_pair_data_dict = {}  # {symbol:{exchange_id: <data>}})
+    swap_pair_for_deal_info_dict = {} # Словарь с данными для открытия сделок
 
     # noinspection PyAbstractClass
     async with AsyncExitStack() as stack:
-
         async def open_exchange(exchange_id):
             return exchange_id, await stack.enter_async_context(ExchangeInstance(ccxt, exchange_id, log=True))
 
@@ -528,23 +537,22 @@ async def main():
                     if swap_data.get('linear') and not swap_data.get('inverse'):
                         swap_pair_data_dict.setdefault(symbol, {})[exchange_id] = swap_data
 
-
         # pprint(swap_pair_data_dict)
-
-        # Парсинг данных для swap_pair_for_deal_info
+        # Парсинг данных для swap_pair_for_deal_info_dict
         for symbol, volume in swap_pair_data_dict.items():
-            # Проверим количество бирж с символом - если меньше двух - пропускаем
-            if len(swap_pair_data_dict.get(symbol)) < 2:
+            if len(volume) < 2:
                 continue
-            max_contractsize = 0
-            data = swap_pair_data_dict.get(symbol)
+            max_contractSize = 0 # Максимальный размер единичного контракта среди бирж символа
+            # объем сделки должен быть рассчитан исходя из максимального размера контрактов в группе и кратен максимальному размеру
             for exchange_id, data in volume.items():
-                swap_pair_for_deal_info.setdefault(symbol,{})[exchange_id]['contractSize'] = data.get(exchange_id,{}).get('contractSize', None)
+                contractSize = data.get('contractSize')
+                if max_contractSize < contractSize:
+                    max_contractSize = contractSize
+                swap_pair_for_deal_info_dict.setdefault(symbol, {}).setdefault(exchange_id, {})['contractSize'] = contractSize
+            for exchange_id, data in volume.items():
+                swap_pair_for_deal_info_dict[symbol][exchange_id]['max_contractSize'] = max_contractSize
 
-       pprint(swap_pair_for_deal_info)
-
-
-
+        pprint(swap_pair_for_deal_info_dict)
 
         for symbol in list(swap_pair_data_dict):
             if len(swap_pair_data_dict[symbol]) < 2:
@@ -560,16 +568,12 @@ async def main():
             if 'okx' in swap_pair_data_dict[symbol]:
                 c3 += 1
 
-
-
         pprint (swap_pair_data_dict)
         print(len(swap_pair_data_dict))
         print(c1, c2, c3)
 
         # ---- graceful shutdown ----
-
         stop_event = asyncio.Event()
-
         loop = asyncio.get_running_loop()
         loop.add_signal_handler(signal.SIGINT, stop_event.set)
         loop.add_signal_handler(signal.SIGTERM, stop_event.set)

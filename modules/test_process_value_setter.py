@@ -84,7 +84,9 @@ def string_reader_process (shared_values: dict):
 
         time.sleep (0.5)  # Читаем чаще чем пишем
 
-    print ("[string_reader] Завершение")import time
+    print ("[string_reader] Завершение")
+
+import time
 import multiprocessing
 from datetime import datetime
 from modules.process_manager import ProcessManager
