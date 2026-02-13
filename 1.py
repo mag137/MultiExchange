@@ -1,21 +1,36 @@
+__version__ = '0.12'
+
 import asyncio
 from contextlib import AsyncExitStack
+
+import task_manager
+from modules.task_manager import TaskManager
 from pprint import pprint
 from typing import Dict, List
+import signal
 
 # Импортируем твой класс и ExchangeInstance
 from modules.exchange_instance import ExchangeInstance
 
 import ccxt.pro as ccxt  # ccxt.pro нужен для ExchangeInstance
 
-class Arbitr:
+class ArbitragePairs:
     arbitrage_obj_dict = {}
+    task_manager = TaskManager()
 
     def __init__(self, symbol, swap_pairs_raw_data_dict, swap_pairs_processed_data_dict):
         self.symbol = symbol
         self.swap_pairs_raw_data_dict = swap_pairs_raw_data_dict
         self.swap_pairs_processed_data_dict = swap_pairs_processed_data_dict
+        self.task_manager = self.__class__.task_manager
 
+    # Основной метод арбитража символа
+    async def start_symbol_arbitrage(self):
+        print(self.symbol)
+        task = asyncio.current_task()
+        print(f"Имя задачи: {task.get_name()}")
+        await asyncio.sleep(30)
+        pass
 
     # Инициализация данных списка бирж
     @classmethod
@@ -57,25 +72,42 @@ class Arbitr:
                 for exchange_id, data in volume.items():
                     cls.swap_pairs_processed_data_dict[symbol][exchange_id]['max_contractSize'] = max_contract_size
 
-            for symbol in cls.swap_pairs_processed_data_dict.keys():
-                cls.arbitrage_obj_dict[symbol]=cls.create_obj(symbol=symbol,
-                                                              swap_pairs_raw_data_dict=cls.swap_pairs_raw_data_dict,
-                                                              swap_pairs_processed_data_dict=cls.swap_pairs_processed_data_dict)
+            # Создаем экземпляры класса по каждому символу в ключах словаря
+            for symbol in list(cls.swap_pairs_processed_data_dict.keys())[:12]:
+                _obj =cls.create_obj (symbol=symbol,
+                                      swap_pairs_raw_data_dict=cls.swap_pairs_raw_data_dict,
+                                      swap_pairs_processed_data_dict=cls.swap_pairs_processed_data_dict)
+                cls.arbitrage_obj_dict[symbol] = _obj
+                task_arbitrage_symbol_name = f"_SymbolTask|{symbol}"
+                cls.task_manager.add_task(name=task_arbitrage_symbol_name, coro_func=_obj.start_symbol_arbitrage)
 
             pprint(cls.swap_pairs_processed_data_dict)
+
+            await asyncio.sleep(5)
+            pprint(cls.task_manager.task_status_dict())
+            # ---- graceful shutdown ----
+            stop_event = asyncio.Event()
+            loop = asyncio.get_running_loop()
+            try:
+                loop.add_signal_handler(signal.SIGINT, stop_event.set)
+                loop.add_signal_handler(signal.SIGTERM, stop_event.set)
+            except NotImplementedError:
+                pass
+
+            await stop_event.wait()
 
 
 async def main():
     exchanges_id_list = ["phemex", "okx", "gateio"]
 
     # Инициализация данных с бирж и создание объектов Arbitr
-    await Arbitr.init_exchanges_pairs_data(exchanges_id_list)
+    await ArbitragePairs.init_exchanges_pairs_data(exchanges_id_list)
 
     # Доступ к объектам для конкретной пары
-    for symbol, arbitr_obj in Arbitr.arbitrage_obj_dict.items():
+    for symbol, arbitrage_obj in ArbitragePairs.arbitrage_obj_dict.items():
         print(f"Объект для {symbol}:")
-        print("Сырые данные:", arbitr_obj.swap_pairs_raw_data_dict.get(symbol))
-        print("Обработанные данные:", arbitr_obj.swap_pairs_processed_data_dict.get(symbol))
+        print("Сырые данные:", arbitrage_obj.swap_pairs_raw_data_dict.get(symbol))
+        print("Обработанные данные:", arbitrage_obj.swap_pairs_processed_data_dict.get(symbol))
         print("-" * 60)
 
 if __name__ == "__main__":
