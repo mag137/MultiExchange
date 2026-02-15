@@ -1,108 +1,27 @@
-__version__ = "3.0 OKX"
-
 import asyncio
-import signal
-import logging
-from modules.task_manager import TaskManager
-from modules.logger import LoggerFactory
-from modules.process_manager import ProcessManager
-from modules import (cprint, round_down, get_average_orderbook_price, sync_time_with_exchange)
-from modules.arbitrage_pairs import run_analytic_process_wrapper
-from modules.test_process_value_getter import shared_values_receiver
-from modules.test_process_value_setter import string_writer_process
-from modules.TkGrid3 import run_gui_grid_process
-from functools import partial
-import itertools
-import multiprocessing
+import ccxt.async_support as ccxt
 from pprint import pprint
-import random
-
-import multiprocessing
-import time
-from asyncio import Queue, ALL_COMPLETED
-from itertools import count
-
-import ccxt.pro as ccxt
-import os
-import asyncio
-import random
-
-from modules.logger import LoggerFactory
-from modules.exchange_instance import ExchangeInstance
-from modules.process_manager import ProcessManager
-from modules.task_manager import TaskManager
-from modules.ORJSON_file_manager import JsonFileManager
-from modules.telegram_bot_message_sender import TelegramMessageSender
-# from modules.TkGrid3 import TkGrid
-from modules.row_TkGrid import Row_TkGrid
-from typing import List, Dict, Any, Optional
-from decimal import Decimal, getcontext, ROUND_HALF_UP, InvalidOperation
-from functools import partial
-from datetime import datetime, UTC
-from contextlib import AsyncExitStack
-from modules.exception_classes import ( ReconnectLimitExceededError,
-                                        InvalidOrEmptyOrderBookError,
-                                        BaseArbitrageCalcException,
-                                        InsufficientOrderBookVolumeError)
-
-# Пока делаем сисему заточенную на работу только с двумя биржами. Если все будет ок - будем немного менять архитектуру и масштабировать
+API_KEY = "Y1RWE7J3-ID5L2N9Z-CXUVIV8X-UB12YXZ7"
+API_SECRET = "f7458883d513af22a2cbc2ef32121f521c6eb96a1517cd2ed96ee0fd893e4eb814c44f4bd3df3d8a1ccbcd89d884f5855206c3b804ac739895c97bce0ac74b60"
 
 async def main():
-    exchange_id_list = ["phemex", "okx", "gateio"]
-    exchange_instance_dict = {}
-    swap_pair_data_dict = {}  # {symbol:{exchange_id: <data>}}
-    all_swap_symbols_set = set()
+    exchange = ccxt.poloniex({
+        "apiKey": API_KEY,
+        "secret": API_SECRET,
+    })
 
-    # noinspection PyAbstractClass
-    async with AsyncExitStack() as stack:
+    try:
+        await exchange.load_markets()
+        print("Markets loaded:", len(exchange.markets))
 
-        async def open_exchange(exchange_id):
-            exchange = await stack.enter_async_context(ExchangeInstance(ccxt, exchange_id, log=True))
-            return exchange_id, exchange
+        balance = await exchange.fetch_balance({ "type": "swap"})
+        pprint(balance)
+        print("=== TOTAL BALANCE ===")
+        for coin, amount in balance["total"].items():
+            if amount and amount > 0:
+                print(f"{coin}: {amount}")
 
-        results = await asyncio.gather(*(open_exchange(exchange_id) for exchange_id in exchange_id_list))
-        exchange_instance_dict = dict(results)
+    finally:
+        await exchange.close()
 
-        for exchange_id, exchange in exchange_instance_dict.items():
-            print(exchange.id)
-            for pair_data in exchange.spot_swap_pair_data_dict.values():
-                if swap_data := pair_data.get("swap"):
-                    symbol = swap_data["symbol"]
-                    all_swap_symbols_set.add(symbol)
-                    swap_pair_data_dict.setdefault(symbol, {})[exchange_id] = swap_data["symbol"]
-
-        for symbol in list(swap_pair_data_dict):
-            if len(swap_pair_data_dict[symbol]) < 2:
-                swap_pair_data_dict.pop(symbol)
-        c1 = 0
-        c2 = 0
-        c3 = 0
-        for symbol in list(swap_pair_data_dict):
-            if 'gateio' in swap_pair_data_dict[symbol]:
-                c1 += 1
-            if 'phemex' in swap_pair_data_dict[symbol]:
-                c2 += 1
-            if 'okx' in swap_pair_data_dict[symbol]:
-                c3 += 1
-
-
-
-        pprint (swap_pair_data_dict)
-        print(len(swap_pair_data_dict))
-        print(c1, c2, c3)
-
-        # ---- graceful shutdown ----
-
-        stop_event = asyncio.Event()
-
-        loop = asyncio.get_running_loop()
-        loop.add_signal_handler(signal.SIGINT, stop_event.set)
-        loop.add_signal_handler(signal.SIGTERM, stop_event.set)
-
-        await stop_event.wait()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-
-
+asyncio.run(main())

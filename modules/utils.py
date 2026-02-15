@@ -107,6 +107,10 @@ def _count_decimal_places(value: Union[int, float, str, Decimal]) -> int:
     exponent = d.as_tuple().exponent
     return max(0, -exponent)
 
+def to_decimal(value):
+    return Decimal(str(value)) if value is not None else None
+
+
 def safe_decimal(val, field_name: str = ""):
     """Безопасная конвертация в Decimal с логгированием."""
     if val is None or val == "" or val == "null" or isinstance(val, type(None)):
@@ -290,10 +294,6 @@ def get_average_orderbook_price(
         )
 
     return final_price
-
-
-
-
 
 def sync_async_runner(f: Callable[..., Coroutine[Any, Any, Any]]) -> Callable[..., Any]:
     """

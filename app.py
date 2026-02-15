@@ -473,8 +473,6 @@ class ExchangeInstrument():
                                 pass
                             await self.statistic_queue.put({self.symbol: {self.exchange_id: statistics_dict}})
 
-
-
                 except Exception as e:
                     error_str = str(e)
                     transient_errors = [
