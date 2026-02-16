@@ -1,4 +1,4 @@
-__version__ = "1.1"
+__version__ = "1.2"
 
 import asyncio
 import signal
@@ -123,7 +123,7 @@ class BalanceManager:
 
     async def stop(self) -> None:
         self.enable = False
-        self.task_manager.cancel_task(self.task_name)
+        await self.task_manager.cancel_task(self.task_name)
         await self.task_manager.await_cancellation(name=self.task_name, timeout=5)
 
 
