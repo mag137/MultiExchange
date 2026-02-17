@@ -4,7 +4,6 @@ import asyncio
 from contextlib import AsyncExitStack
 from decimal import Decimal
 import ccxt.pro as ccxt  # ccxt.pro нужен для ExchangeInstance
-import task_manager
 from modules.task_manager import TaskManager
 from modules.balance_manager import BalanceManager
 from pprint import pprint
@@ -28,7 +27,7 @@ class ExchangeInstrument():
     # Словарь данных ордербуков для отправки в очередь вида {exchange_ids:{orderbook_data}}
     orderbook_data_dict = {}
 
-    def __init__(self, exchange, symbol, swap_data, balance_dict, orderbook_queue: asyncio.Queue, statistic_queue: asyncio.Queue = None):
+    def __init__(self, exchange, symbol, swap_data, balance_manager, orderbook_queue: asyncio.Queue, statistic_queue: asyncio.Queue = None):
         # Словарь счетчиков пришедших стаканов целевого символа заданной биржи
         self.get_ex_orderbook_data_count = {}
         fee = swap_data.get("taker")
@@ -38,7 +37,7 @@ class ExchangeInstrument():
         self.statistic_queue = statistic_queue # Очередь отсылки статистики работы watch_orderbook
         self.symbol = symbol
         self.__class__.orderbook_data_dict.setdefault(symbol, {})
-        self.balance_dict = balance_dict
+        self.balance_manager = balance_manager
         self.orderbook_updating = False
         self.contract_size = ''
         self.tick_size = ''
@@ -47,13 +46,8 @@ class ExchangeInstrument():
         self.fee = ''
         self.update_swap_data(swap_data=swap_data)
 
-
-    @property
-    def balance_usdt(self):
-        value = self.balance_dict.get(self.exchange_id)
-        if value is None:
-            return None
-        return to_decimal(value)
+    async def get_balance_usdt(self):
+        return await self.balance_manager.get_balance()
 
     # Метод обновления данных
     def update_swap_data(self, swap_data):
@@ -98,8 +92,7 @@ class ExchangeInstrument():
         try:
             # Ожидание баланса
             # todo реализовать получение экземпляром минимального баланса бирж
-            while self.balance_usdt is None:
-                await asyncio.sleep(0.1)
+            await self.balance_manager.wait_initialized()
 
             balance = self.balance_usdt
 
@@ -112,6 +105,9 @@ class ExchangeInstrument():
             # Цикл работает пока есть подписка
             while self.__class__.orderbook_updating_status_dict[self.exchange_id][self.symbol]:
                 try:
+                    if not await self.balance_manager.is_balance_valid():
+                        continue
+
                     orderbook = await self.exchange.watchOrderBook(self.symbol)
 
                     # сбрасываем счётчик после успешного получения
@@ -140,9 +136,15 @@ class ExchangeInstrument():
                             continue
 
                         try:
+                            _, min_balance = await BalanceManager.get_min_balance()
+
+
+                            if balance is None or balance <= 0:
+                                continue
+
                             average_ask = get_average_orderbook_price(
                                 data=orderbook['asks'],
-                                money=self.balance_usdt, # Здесь используется минимальный баланс, получаемый из классного метода - минимум среди всех биржевых депозитов
+                                money=min_balance, # Здесь используется минимальный баланс, получаемый из классного метода - минимум среди всех биржевых депозитов
                                 is_ask=True,
                                 log=True,
                                 exchange=self.exchange_id,
@@ -151,7 +153,7 @@ class ExchangeInstrument():
 
                             average_bid = get_average_orderbook_price(
                                 data=orderbook['bids'],
-                                money=self.balance_usdt,
+                                money=min_balance,
                                 is_ask=False,
                                 log=True,
                                 exchange=self.exchange_id,
@@ -269,6 +271,9 @@ class ArbitragePairs:
     arbitrage_obj_dict = {}
     task_manager = TaskManager()
     balance_managers = {}
+    free_deals_slot = None          # Количество доступных слотов сделок (активная сделка занимает один слот).
+                                    # При открытии сделки аргумент - декриментируется, При закрытии - инкрементируется.
+                                    # Открытия сделки доступно пока есть свободный слот.
 
     def __init__(self, symbol, swap_pairs_raw_data_dict, swap_pairs_processed_data_dict):
         self.symbol = symbol
@@ -292,12 +297,16 @@ class ArbitragePairs:
         # Запустим на исполнение экземпляры ExchangeInstrument для каждой биржи символа
         for exchange_id in self.swap_pairs_processed_data_dict.keys():
             exchange = self.exchanges_instance_dict.get(exchange_id)
-            _obj = ExchangeInstrument  (exchange=exchange,
+            balance_manager = self.__class__.balance_managers.get(exchange_id)
+
+            _obj = ExchangeInstrument  (
+                                        exchange=exchange,
                                         symbol=symbol,
                                         swap_data=self.swap_pairs_raw_data_dict.get(exchange_id),
-                                        balance_dict=self.balance_dict,
+                                        balance_manager=balance_manager,
                                         orderbook_queue=self.orderbook_queue,
-                                        statistic_queue=self.statistic_queue)
+                                        statistic_queue=self.statistic_queue
+                                       )
             self.exchange_instrument_obj_dict[exchange_id] = _obj
             task_name = f"_OrderbookTask|{symbol}|{exchange_id}"
             self.task_manager.add_task(name=task_name, coro_func=_obj.watch_orderbook)
@@ -393,6 +402,8 @@ async def main():
 
     # Инициализация данных с бирж и создание объектов Arbitr
     await ArbitragePairs.init_exchanges_pairs_data(exchanges_id_list)
+    # Зададим максимальное количество одновременных сделок
+    ArbitragePairs.max_deals = 2
 
     # Доступ к объектам для конкретной пары
     for symbol, arbitrage_obj in ArbitragePairs.arbitrage_obj_dict.items():
