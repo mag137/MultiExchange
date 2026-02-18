@@ -1,4 +1,4 @@
-__version__ = "1.3"
+__version__ = "1.4"
 
 import asyncio
 import signal
@@ -43,6 +43,9 @@ class BalanceManager:
                 balance_data = await self.exchange.watch_balance({"type": "swap"})
                 await self._process_balance(balance_data)
                 retry_attempts = 0
+
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 retry_attempts += 1
                 backoff = min(self.RETRY_DELAY * 2 ** (retry_attempts - 1), max_backoff)
@@ -80,9 +83,9 @@ class BalanceManager:
     async def _update_balance(self, value) -> None:
         dec_value = to_decimal(value) if value is not None else None
         async with self._lock:
+            self._last_request_ts = time.monotonic()
             if self._balance != dec_value:
                 self._balance = dec_value
-                self._last_request_ts = time.monotonic()
                 cprint.success_w(
                     f"[BalanceManager][{self.exchange_id}] Balance updated: {dec_value}"
                 )
@@ -95,11 +98,14 @@ class BalanceManager:
             return self._balance
 
     async def is_balance_valid(self) -> bool:
-        if self._balance is None:
-            return False
-        if self._last_request_ts is None:
-            return False
-        return (time.monotonic() - self._last_request_ts) <= self.BALANCE_REQUEST_TIMEOUT
+        async with self._lock:
+            if self._balance is None:
+                return False
+            if self._last_request_ts is None:
+                return False
+            return (
+                    time.monotonic() - self._last_request_ts
+            ) <= self.BALANCE_REQUEST_TIMEOUT
 
     @classmethod
     async def get_min_balance(cls) -> tuple[Optional[str], Optional[Decimal]]:
@@ -121,10 +127,20 @@ class BalanceManager:
             return float("inf")
         return time.monotonic() - self._last_request_ts
 
+    async def get_deal_balance(self, free_deal_slot = 1):
+        if free_deal_slot <= 0:
+            return None
+        _, min_balance = await self.__class__.get_min_balance()
+        if min_balance is None:
+            return None
+        return min_balance * Decimal("0.9") / Decimal(free_deal_slot)
+
     async def stop(self) -> None:
         self.enable = False
         await self.task_manager.cancel_task(self.task_name)
         await self.task_manager.await_cancellation(name=self.task_name, timeout=5)
+
+        self.__class__._instances.pop(self.exchange_id, None)
 
 
 async def main():
