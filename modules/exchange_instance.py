@@ -1,4 +1,4 @@
-__version__ = '5.11'
+__version__ = '6.0'
 
 import ssl
 import certifi
@@ -168,12 +168,17 @@ class ExchangeInstance:
         if self.exchange_id == 'gateio':
             self.exchange.options['createMarketBuyOrderRequiresPrice'] = False
 
+        # Загружаем рынки и обновляем атрибут spot_swap_pair_data_dict
         await self.load_markets_data()
+
+        # Гарантируем, что атрибут есть на объекте биржи, даже если словарь пустой
+        if not hasattr(self.exchange, 'spot_swap_pair_data_dict'):
+            self.exchange.spot_swap_pair_data_dict = self.spot_swap_pair_data_dict or {}
+
         self.exchange.deal_amounts_calc_func = self.deal_amounts_calc_func
         self.start_background_market_updater()
 
         return self.exchange
-
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         if self._market_updater_task:
@@ -204,84 +209,79 @@ class ExchangeInstance:
     # ===============================================================
     # ЗАГРУЗКА И ОБНОВЛЕНИЕ MARKETS С РАСШИРЕННЫМ ЛОГОМ
     # ===============================================================
-    async def load_markets_data(self, force_reload: bool = False) -> Dict[str, Any]:
+    # ===============================================================
+    # ЗАГРУЗКА И ОБНОВЛЕНИЕ MARKETS С РАСШИРЕННЫМ ЛОГОМ
+    # ===============================================================
+    async def load_markets_data(self, force_reload: bool = False) -> dict:
         if not self.exchange:
             raise RuntimeError("Биржа не инициализирована")
 
         self.exchange.markets_updating = True
-
         start_time = asyncio.get_event_loop().time()
+
+        # Загружаем рынки
         markets = await self.exchange.load_markets(reload=force_reload)
         while not markets:
             await asyncio.sleep(0.2)
         latency_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
 
-        # Перерасчёт данных
+        # --- Создаём экземпляр MarketsSortData ---
         new_sort_instance = MarketsSortData(markets, log=False)
-        new_dict = new_sort_instance.spot_swap_pair_data_dict
 
-        changed = new_dict != self.spot_swap_pair_data_dict
+        # --- Формируем spot_swap_pair_data_dict по base/quote ---
+        new_dict = {}
+        spot_markets = {k: v for k, v in markets.items() if v.get('spot')}
+        swap_markets = {k: v for k, v in markets.items() if v.get('swap')}
 
-        if changed:
-            # --- НОРМАЛИЗАЦИЯ КОМИССИЙ ---
-            for pair_name, pair_data in new_dict.items():
+        for spot_sym, spot_data in spot_markets.items():
+            base = spot_data['base']
+            quote = spot_data['quote']
+
+            # ищем swap с тем же base/quote
+            matched_swap = None
+            for swap_sym, swap_data in swap_markets.items():
+                if swap_data['base'] == base and swap_data['quote'] == quote:
+                    matched_swap = swap_data
+                    break
+
+            if matched_swap:
+                pair_name = f"{spot_sym}_{matched_swap['symbol']}"
+                new_dict[pair_name] = {
+                    'spot': spot_data,
+                    'swap': matched_swap
+                }
+
+                # нормализуем комиссии
                 for market_type in ('spot', 'swap'):
-                    market = pair_data.get(market_type)
-                    if not market:
-                        continue
-
+                    market = new_dict[pair_name][market_type]
                     taker = market.get('taker')
                     maker = market.get('maker')
-
                     market['taker_fee'] = float(taker) if taker is not None else 0.0
                     market['maker_fee'] = float(maker) if maker is not None else 0.0
 
-        # Проверяем изменения
+        # Проверка на изменения
         changed = new_dict != self.spot_swap_pair_data_dict
-
-        # Подсчёт статистики
-        total_markets = len(markets)
-        total_pairs = len(new_dict)
-        added = len(set(new_dict) - set(self.spot_swap_pair_data_dict))
-        removed = len(set(self.spot_swap_pair_data_dict) - set(new_dict))
-        diff_count = sum(1 for k in new_dict if k in self.spot_swap_pair_data_dict and new_dict[k] != self.spot_swap_pair_data_dict[k])
-        size_kb = round(sum(len(json.dumps(v)) for v in new_dict.values()) / 1024, 2)
 
         if changed:
             self.markets = markets
+
+            # **Важно:** обновляем экземпляр MarketsSortData, чтобы deal_amounts_calc_func работал
+            new_sort_instance.spot_swap_pair_data_dict = new_dict
             self.MarketsSortData_instance = new_sort_instance
+
             self.spot_swap_pair_data_dict = new_dict
             self.upload_counter += 1
             self.exchange.upload_counter = self.upload_counter
             self.exchange.spot_swap_pair_data_dict = new_dict
 
             logger.info(
-                f"[{self.exchange_id}] Markets обновлены:\n"
-                f"    Upload №: {self.upload_counter}\n"
-                f"    Всего рынков: {total_markets}\n"
-                f"    Spot/Swap пар: {total_pairs}\n"
-                f"    Добавлено новых рынков: {added}\n"
-                f"    Удалено рынков: {removed}\n"
-                f"    Изменено рынков: {diff_count}\n"
-                f"    Размер данных: {size_kb} KB\n"
-                f"    Время обновления: {latency_ms} ms"
+                f"[{self.exchange_id}] Markets обновлены: "
+                f"Всего рынков: {len(markets)}, Spot/Swap пар: {len(new_dict)}, Время: {latency_ms} ms"
             )
-
-            # Пишем тестовый файл только если включён лог
-            if self.log:
-                test_file = self.source_path / "test_markets_data.json"
-                try:
-                    with open(test_file, "w", encoding="utf-8") as f:
-                        json.dump(new_dict, f, ensure_ascii=False, indent=4)
-                except Exception as e:
-                    logger.error(f"[{self.exchange_id}] ошибка записи test_markets_data.json: {e}")
         else:
             logger.debug(
-                f"[{self.exchange_id}] Markets загружены без изменений:\n"
-                f"    Upload №: {self.upload_counter}\n"
-                f"    Всего рынков: {total_markets}\n"
-                f"    Spot/Swap пар: {total_pairs}\n"
-                f"    Время загрузки: {latency_ms} ms"
+                f"[{self.exchange_id}] Markets без изменений: "
+                f"Spot/Swap пар: {len(new_dict)}, Время: {latency_ms} ms"
             )
 
         self.exchange.markets_updating = False
@@ -337,25 +337,44 @@ class ExchangeInstance:
 
 
 async def main():
+    # Создаём экземпляр ExchangeInstance
     async with ExchangeInstance(ccxt, "okx", update_interval=120, log=True) as exchange:
+        # Синхронизируем время биржи
         await sync_time_with_exchange(exchange)
-        while not exchange.spot_swap_pair_data_dict:
-            await asyncio.sleep(0.1)
 
+        # Ждём, пока spot_swap_pair_data_dict появится на объекте биржи
+        timeout = 10  # секунд
+        start = asyncio.get_event_loop().time()
+        while not getattr(exchange, 'spot_swap_pair_data_dict', None):
+            await asyncio.sleep(0.1)
+            if asyncio.get_event_loop().time() - start > timeout:
+                logger.warning(f"[{exchange.id}] Спот/своп пары не найдены после {timeout}s")
+                break
+
+        spot_swap_pairs = getattr(exchange, 'spot_swap_pair_data_dict', {})
+
+        if not spot_swap_pairs:
+            print(f"[{exchange.id}] Нет арбитражных пар для обработки")
+            return
+
+        # Пример расчёта сделки
         deal_pair = 'BTC/USDT_BTC/USDT:USDT'
-        res2 = exchange.deal_amounts_calc_func(
-            deal_pair=deal_pair,
-            spot_deal_usdt=100,
-            swap_deal_usdt=90,
-            price_spot=0.8004,
-            price_swap=0.7989
-        )
-        pprint(res2)
-        pprint(exchange.spot_swap_pair_data_dict.keys())
-        print('===================================================================================')
-        print('BTC/USDT_BTC/USDT:USDT')
-        pprint(exchange.spot_swap_pair_data_dict['BTC/USDT_BTC/USDT:USDT']['swap'])
-        print("Всего арбитражных пар собрано:", len(exchange.spot_swap_pair_data_dict))
+        if deal_pair in spot_swap_pairs:
+            res2 = exchange.deal_amounts_calc_func(
+                deal_pair=deal_pair,
+                spot_deal_usdt=100,
+                swap_deal_usdt=90,
+                price_spot=0.8004,
+                price_swap=0.7989
+            )
+            pprint(res2)
+        else:
+            print(f"[{exchange.id}] Пара {deal_pair} отсутствует в данных")
+
+        # Список всех собранных арбитражных пар
+        print("Всего арбитражных пар собрано:", len(spot_swap_pairs))
+        pprint(list(spot_swap_pairs.keys()))
+
 
 
 if __name__ == '__main__':
