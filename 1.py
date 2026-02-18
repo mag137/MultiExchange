@@ -398,7 +398,7 @@ class ArbitragePairs:
 
 
 async def main():
-    exchanges_id_list = ["phemex", "okx", "gateio"]
+    exchanges_id_list = ["gateio", "okx"]
 
     # Инициализация данных с бирж и создание объектов Arbitr
     await ArbitragePairs.init_exchanges_pairs_data(exchanges_id_list)
