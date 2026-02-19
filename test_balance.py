@@ -1,6 +1,5 @@
-__version__ = '2.0'
-# Класс выполнен по паттерну Multiton
 import asyncio
+import signal
 import time
 from decimal import Decimal
 from typing import Dict, Optional
@@ -182,11 +181,6 @@ class BalanceManager:
             return None, None
         if cls.max_deal_slots:
             cls.max_deal_volume = to_decimal('0.9') * cls.min_balance / cls.max_deal_slots
-            # Синхронизация с экземплярами
-            for obj in cls.exchange_balance_instance_dict.values():
-                obj.min_balance = cls.min_balance
-                obj.exchange_min_balance = cls.exchange_min_balance
-                obj.max_deal_volume = cls.max_deal_volume
         return min_exchange_id, min_balance
 
 async def main():
@@ -212,7 +206,6 @@ async def main():
         print(f"Минимальный баланс: {min_balance} на бирже {min_ex_id}")
         print(BalanceManager.exchange_min_balance, BalanceManager.min_balance)
         print(BalanceManager.max_deal_volume)
-        print(BalanceManager.exchange_balance_instance_dict['okx'].max_deal_volume)
 
 
 if __name__ == "__main__":
