@@ -22,22 +22,24 @@ from modules.exception_classes import ( ReconnectLimitExceededError,
                                         InsufficientOrderBookVolumeError)
 
 class ExchangeInstrument():
+    # Обязательна передача ссылки на класс BalanceManager
+    balance_manager = None
     # Словарь флагов ордербук-сокетов вида {exchange_ids:{symbol: true/false}} - по нему можно собирать статистику открытых сокетов на всех биржах
     orderbook_updating_status_dict = {}
-    # Словарь данных ордербуков для отправки в очередь вида {exchange_ids:{orderbook_data}}
-    orderbook_data_dict = {}
 
-    def __init__(self, exchange, symbol, swap_data, balance_manager, orderbook_queue: asyncio.Queue, statistic_queue: asyncio.Queue = None):
+    def __init__(self, exchange, symbol, swap_data, orderbook_queue: asyncio.Queue, statistic_queue: asyncio.Queue = None):
         # Словарь счетчиков пришедших стаканов целевого символа заданной биржи
         self.get_ex_orderbook_data_count = {}
         fee = swap_data.get("taker")
         self.exchange = exchange
         self.exchange_id = exchange.id
+        self.symbol = symbol
         self.orderbook_queue = orderbook_queue # Очередь данных ордербуков, сообщений вида {exchange_id: {data_dict}}. На каждый символ своя очередь
         self.statistic_queue = statistic_queue # Очередь отсылки статистики работы watch_orderbook
-        self.symbol = symbol
-        self.__class__.orderbook_data_dict.setdefault(symbol, {})
-        self.balance_manager = balance_manager
+        if self.__class__.balance_manager:
+            self.balance_manager_instance = self.__class__.balance_manager.get_instance(exchange.id)
+        else:
+            cprint.error(f"[ExchangeInstrument][_init_] Не передан экземпляр balance_manager [{exchange.id}][{symbol}]")
         self.orderbook_updating = False
         self.contract_size = ''
         self.tick_size = ''
@@ -45,9 +47,33 @@ class ExchangeInstrument():
         self.min_amount = ''
         self.fee = ''
         self.update_swap_data(swap_data=swap_data)
+        self.deal_balance = None
+        self.exchange_balance = None
+        self.min_exchanges_balance = None
 
-    async def get_balance_usdt(self):
-        return await self.balance_manager.get_balance()
+    async def get_exchange_balance(self):
+        if await self.balance_manager_instance.is_balance_valid:
+            self.exchange_balance = await self.balance_manager_instance.get_balance()
+            return self.exchange_balance
+        else:
+            cprint.error_w(f"[ExchangeInstrument][get_exchange_balance] Нет баланса [{self.exchange_id}]")
+            return False
+
+    async def get_min_exchanges_balance(self):
+        if await self.balance_manager_instance.is_balance_valid:
+            self.min_exchanges_balance = await self.balance_manager_instance.get_min_balance()
+            return self.min_exchanges_balance
+        else:
+            cprint.error_w(f"[ExchangeInstrument][get_min_exchanges_balance] Нет баланса [{self.exchange_id}]")
+            return False
+
+    async def get_deal_balance(self):
+        if await self.balance_manager_instance.is_balance_valid:
+            self.deal_balance = await self.balance_manager_instance.get_deal_balance()
+            return self.deal_balance
+        else:
+            cprint.error_w(f"[ExchangeInstrument][get_deal_balance] Нет баланса [{self.exchange_id}]")
+            return False
 
     # Метод обновления данных
     def update_swap_data(self, swap_data):
@@ -266,152 +292,4 @@ class ExchangeInstrument():
         finally:
             self.__class__.orderbook_updating_status_dict.setdefault(self.exchange_id, {})[self.symbol] = False
 
-class ArbitragePairs:
-    exchanges_instance_dict = {}    # Словарь с экземплярами бирж
-    balance_dict = {}               # Словарь балансов usdt вида {exchange_id: <balance_usdt>}
-    arbitrage_obj_dict = {}
-    task_manager = TaskManager()
-    balance_managers = {}
-    free_deals_slot = None          # Количество доступных слотов сделок (активная сделка занимает один слот).
-                                    # При открытии сделки аргумент - декриментируется, При закрытии - инкрементируется.
-                                    # Открытия сделки доступно пока есть свободный слот.
 
-    def __init__(self, symbol, swap_pairs_raw_data_dict, swap_pairs_processed_data_dict):
-        self.symbol = symbol
-        self.balance_dict = self.__class__.balance_dict
-        self.exchanges_instance_dict = self.__class__.exchanges_instance_dict
-        self.swap_pairs_raw_data_dict = swap_pairs_raw_data_dict.get(symbol, None)
-        self.swap_pairs_processed_data_dict = swap_pairs_processed_data_dict.get(symbol, None)
-        self.task_manager = self.__class__.task_manager
-        # Словарь с экземплярами нижнего класса для каждой биржи вида {exchange_id: <obj>}
-        self.exchange_instrument_obj_dict = {}
-        self.orderbook_queue = asyncio.Queue()
-        self.statistic_queue = asyncio.Queue()
-
-    # Основной метод арбитража символа
-    async def start_symbol_arbitrage(self):
-        symbol = self.symbol
-        print(symbol)
-        task = asyncio.current_task()
-        print(f"Имя задачи: {task.get_name()}")
-
-        # Запустим на исполнение экземпляры ExchangeInstrument для каждой биржи символа
-        for exchange_id in self.swap_pairs_processed_data_dict.keys():
-            exchange = self.exchanges_instance_dict.get(exchange_id)
-            balance_manager = self.__class__.balance_managers.get(exchange_id)
-
-            _obj = ExchangeInstrument  (
-                                        exchange=exchange,
-                                        symbol=symbol,
-                                        swap_data=self.swap_pairs_raw_data_dict.get(exchange_id),
-                                        balance_manager=balance_manager,
-                                        orderbook_queue=self.orderbook_queue,
-                                        statistic_queue=self.statistic_queue
-                                       )
-            self.exchange_instrument_obj_dict[exchange_id] = _obj
-            task_name = f"_OrderbookTask|{symbol}|{exchange_id}"
-            self.task_manager.add_task(name=task_name, coro_func=_obj.watch_orderbook)
-
-        await asyncio.sleep(30)
-        pass
-
-    # Инициализация данных списка бирж
-    @classmethod
-    def create_obj(cls, symbol: str, swap_pairs_raw_data_dict: Dict, swap_pairs_processed_data_dict: Dict):
-        return cls(symbol, swap_pairs_raw_data_dict, swap_pairs_processed_data_dict)
-
-    @classmethod
-    async def init_exchanges_pairs_data(cls, exchanges_id_list):
-        cls.swap_pairs_raw_data_dict = {}                # Словарь сырых с биржи данных для открытия сделок
-        cls.swap_pairs_processed_data_dict = {}          # Словарь распарсенных с биржи данных для открытия сделок
-        async with AsyncExitStack() as stack:
-            async def open_exchange(exchange_id):
-                return exchange_id, await stack.enter_async_context(ExchangeInstance(ccxt, exchange_id, log=True))
-
-            results = await asyncio.gather(*(open_exchange(exchange_id) for exchange_id in exchanges_id_list))
-            cls.exchanges_instance_dict = dict(results)
-
-            for exchange_id, exchange in cls.exchanges_instance_dict.items():
-                print(exchange.id)
-                for pair_data in exchange.spot_swap_pair_data_dict.values():
-                    if swap_data := pair_data.get("swap"):
-                        if not swap_data or swap_data.get("settle") != "USDT":
-                            continue
-                        symbol = swap_data["symbol"]
-                        if swap_data.get('linear') and not swap_data.get('inverse'):
-                            cls.swap_pairs_raw_data_dict.setdefault(symbol, {})[exchange_id] = swap_data
-
-            # Создаём менеджеры баланса
-            cls.balance_managers = {}
-            for exchange_id in cls.exchanges_instance_dict:
-                exchange = cls.exchanges_instance_dict[exchange_id]
-                cls.balance_managers[exchange_id] = BalanceManager(exchange, cls.task_manager)
-
-            # Ожидаем первичную загрузку всех балансов
-            for exchange_id in cls.balance_managers:
-                await cls.balance_managers[exchange_id].wait_initialized()
-
-            # Вывод текущих балансов
-            for exchange_id in cls.balance_managers.keys():
-                balance = await cls.balance_managers[exchange_id].get_balance()
-                cprint.info_b(f"[MAIN] {exchange_id} balance = {balance} USDT")
-
-
-
-            # Парсинг данных для cls.swap_pairs_processed_data_dict
-            for symbol, volume in cls.swap_pairs_raw_data_dict.items():
-                if len(volume) < 2:
-                    continue
-                max_contract_size = 0  # Максимальный размер единичного контракта среди бирж символа
-                # объем сделки должен быть рассчитан исходя из максимального размера контрактов в группе и кратен максимальному размеру
-                for exchange_id, data in volume.items():
-                    contract_size = data.get('contractSize')
-                    if max_contract_size < contract_size:
-                        max_contract_size = contract_size
-                    cls.swap_pairs_processed_data_dict.setdefault(symbol, {}).setdefault(exchange_id, {})['contractSize'] = contract_size
-                for exchange_id, data in volume.items():
-                    cls.swap_pairs_processed_data_dict[symbol][exchange_id]['max_contractSize'] = max_contract_size
-
-            # Создаем экземпляры класса по каждому символу в ключах словаря
-            for symbol in list(cls.swap_pairs_processed_data_dict.keys())[:12]:
-                _obj =cls.create_obj (symbol=symbol,
-                                      swap_pairs_raw_data_dict=cls.swap_pairs_raw_data_dict,
-                                      swap_pairs_processed_data_dict=cls.swap_pairs_processed_data_dict)
-                cls.arbitrage_obj_dict[symbol] = _obj
-                task_arbitrage_symbol_name = f"_SymbolTask|{symbol}"
-                cls.task_manager.add_task(name=task_arbitrage_symbol_name, coro_func=_obj.start_symbol_arbitrage)
-
-            pprint(cls.swap_pairs_processed_data_dict)
-
-            await asyncio.sleep(5)
-            pprint(cls.task_manager.task_status_dict())
-
-            # ---- graceful shutdown ----
-            stop_event = asyncio.Event()
-            loop = asyncio.get_running_loop()
-            try:
-                loop.add_signal_handler(signal.SIGINT, stop_event.set)
-                loop.add_signal_handler(signal.SIGTERM, stop_event.set)
-            except NotImplementedError:
-                pass
-
-            await stop_event.wait()
-
-
-async def main():
-    exchanges_id_list = ["gateio", "okx"]
-
-    # Инициализация данных с бирж и создание объектов Arbitr
-    await ArbitragePairs.init_exchanges_pairs_data(exchanges_id_list)
-    # Зададим максимальное количество одновременных сделок
-    ArbitragePairs.max_deals = 2
-
-    # Доступ к объектам для конкретной пары
-    for symbol, arbitrage_obj in ArbitragePairs.arbitrage_obj_dict.items():
-        print(f"Объект для {symbol}:")
-        print("Сырые данные:", arbitrage_obj.swap_pairs_raw_data_dict.get(symbol))
-        print("Обработанные данные:", arbitrage_obj.swap_pairs_processed_data_dict.get(symbol))
-        print("-" * 60)
-
-if __name__ == "__main__":
-    asyncio.run(main())

@@ -1,4 +1,4 @@
-__version__ = "1.4"
+__version__ = "1.5"
 
 import asyncio
 import signal
@@ -32,6 +32,14 @@ class BalanceManager:
 
         self.__class__._instances[self.exchange_id] = self
         self.task_manager.add_task(name=self.task_name, coro_func=self._balance_loop)
+
+    @classmethod
+    # Метод получения экземпляра класса
+    def get_instance(cls, exchange_id: str) -> "BalanceManager":
+        try:
+            return cls._instances[exchange_id]
+        except KeyError:
+            raise RuntimeError(f"BalanceManager for {exchange_id} not found")
 
     async def _balance_loop(self) -> None:
         await self._initial_fetch()
