@@ -1,4 +1,4 @@
-__version__ = "1.13"
+__version__ = "1.14"
 
 from decimal import Decimal,  ROUND_UP, ROUND_DOWN, InvalidOperation,  ConversionSyntax
 from modules.colored_console import cprint
@@ -109,7 +109,6 @@ def _count_decimal_places(value: Union[int, float, str, Decimal]) -> int:
 
 def to_decimal(value):
     return Decimal(str(value)) if value is not None else None
-
 
 def safe_decimal(val, field_name: str = ""):
     """Безопасная конвертация в Decimal с логгированием."""
@@ -294,6 +293,10 @@ def get_average_orderbook_price(
         )
 
     return final_price
+
+
+
+
 
 def sync_async_runner(f: Callable[..., Coroutine[Any, Any, Any]]) -> Callable[..., Any]:
     """
