@@ -59,7 +59,6 @@ class BalanceManager:
         cls.exchange_balance_instance_dict.pop(exchange_id, None)
 
 
-
     # Для создания экземпляра менеджера просто передаем в него экземпляр биржи
     def __init__(self, exchange):
         self.exchange = exchange
