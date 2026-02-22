@@ -1,4 +1,4 @@
-__version__ = "7.3"
+__version__ = "7.4"
 """
 OKX
 """
@@ -111,7 +111,12 @@ class MarketsSortData:
         for symbol, data in self.markets.items():
             info = data.get("info", {})
             inst_type = info.get("instType", "").upper()
-            state = info.get("state", "").lower()
+            raw_state = info.get("state")
+
+            if isinstance(raw_state, str):
+                state = raw_state.lower()
+            else:
+                state = str(raw_state).lower() if raw_state is not None else ""
             if data.get("active") is False or state not in ("live", ""):
                 continue
             if data.get("spot") or inst_type == "SPOT":
