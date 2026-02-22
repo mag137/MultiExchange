@@ -347,7 +347,7 @@ class ArbitrageManager:
                     }
 
             # Определим лучшие цены символа на разных биржах
-            if len(self.symbol_average_price_dict) > 2:
+            if len(self.symbol_average_price_dict) > 1:
                 for exchange_id, data in self.symbol_average_price_dict.items():
                     if data["average_ask"] < self.min_ask:
                         self.min_ask = data["average_ask"]
@@ -356,7 +356,7 @@ class ArbitrageManager:
                             self.best_close_bid = data["average_bid"]
 
                     if data["average_bid"] > self.max_bid:
-                        self.max_bid = data["average_ask"]
+                        self.max_bid = data["average_bid"]
                         self.max_bid_exchange = exchange_id
                         if data["average_ask"] > self.best_close_ask:
                             self.best_close_ask = data["average_ask"]
