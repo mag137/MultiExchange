@@ -141,44 +141,52 @@ class ExchangeInstance:
     # ENTER / EXIT — КОНТЕКСТНЫЙ МЕНЕДЖЕР
     # ===============================================================
     async def __aenter__(self):
-        ssl_context = self._create_ssl_context()
+        try:
+            ssl_context = self._create_ssl_context()
 
-        self.session = aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(ssl=ssl_context)
-        )
+            self.session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(ssl=ssl_context)
+            )
 
-        self.params.update({
-            'apiKey': self.api_keys.get('API', ''),
-            'secret': self.api_keys.get('Secret', ''),
-            'password': self.api_keys.get('API_pass', ''),
-            'session': self.session,
-            'timeout': 30000,
-        })
+            self.params.update({
+                'apiKey': self.api_keys.get('API', ''),
+                'secret': self.api_keys.get('Secret', ''),
+                'password': self.api_keys.get('API_pass', ''),
+                'session': self.session,
+                'timeout': 30000,
+            })
 
-        if self.exchange_id == 'gateio':
-            uid = self.api_keys.get('uid')
-            if not uid:
-                logger.error("[gateio] отсутствует uid в api_keys.json")
-                raise ValueError("gateio требует ключ uid")
-            self.params['uid'] = uid
+            if self.exchange_id == 'gateio':
+                uid = self.api_keys.get('uid')
+                if not uid:
+                    logger.error("[gateio] отсутствует uid в api_keys.json")
+                    raise ValueError("gateio требует ключ uid")
+                self.params['uid'] = uid
 
-        exchange_class = getattr(self.ccxt_module, self.exchange_id)
-        self.exchange = exchange_class(self.params)
+            exchange_class = getattr(self.ccxt_module, self.exchange_id)
+            self.exchange = exchange_class(self.params)
 
-        if self.exchange_id == 'gateio':
-            self.exchange.options['createMarketBuyOrderRequiresPrice'] = False
+            if self.exchange_id == 'gateio':
+                self.exchange.options['createMarketBuyOrderRequiresPrice'] = False
 
-        # Загружаем рынки и обновляем атрибут spot_swap_pair_data_dict
-        await self.load_markets_data()
+            # Загружаем рынки и обновляем атрибут spot_swap_pair_data_dict
+            await self.load_markets_data()
 
-        # Гарантируем, что атрибут есть на объекте биржи, даже если словарь пустой
-        if not hasattr(self.exchange, 'spot_swap_pair_data_dict'):
-            self.exchange.spot_swap_pair_data_dict = self.spot_swap_pair_data_dict or {}
+            # Гарантируем, что атрибут есть на объекте биржи, даже если словарь пустой
+            if not hasattr(self.exchange, 'spot_swap_pair_data_dict'):
+                self.exchange.spot_swap_pair_data_dict = self.spot_swap_pair_data_dict or {}
 
-        self.exchange.deal_amounts_calc_func = self.deal_amounts_calc_func
-        self.start_background_market_updater()
+            self.exchange.deal_amounts_calc_func = self.deal_amounts_calc_func
+            self.start_background_market_updater()
 
-        return self.exchange
+            return self.exchange
+        except Exception:
+            # гарантированная очистка
+            if self.exchange:
+                await self.exchange.close()
+            if self.session:
+                await self.session.close()
+            raise
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         if self._market_updater_task:
@@ -338,7 +346,7 @@ class ExchangeInstance:
 
 async def main():
     # Создаём экземпляр ExchangeInstance
-    async with ExchangeInstance(ccxt, "okx", update_interval=120, log=True) as exchange:
+    async with ExchangeInstance(ccxt, "bybit", update_interval=120, log=True) as exchange:
         # Синхронизируем время биржи
         await sync_time_with_exchange(exchange)
 
