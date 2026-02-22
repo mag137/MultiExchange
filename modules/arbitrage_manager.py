@@ -1,4 +1,4 @@
-__version__= "0.2"
+__version__ = "0.3"
 
 import signal
 
@@ -6,21 +6,18 @@ from app import task_manager
 from modules import (cprint, round_down, get_average_orderbook_price, sync_time_with_exchange)
 from pprint import pprint
 import time
-
 import ccxt.pro as ccxt
 import asyncio
-
+from decimal import Decimal
 from modules.exchange_instance import ExchangeInstance
 from modules.task_manager import TaskManager
 from modules.balance_manager import BalanceManager
 from contextlib import AsyncExitStack
-
-
 from modules.utils import to_decimal
-from modules.exception_classes import ( ReconnectLimitExceededError,
-                                        InvalidOrEmptyOrderBookError,
-                                        BaseArbitrageCalcException,
-                                        InsufficientOrderBookVolumeError)
+from modules.exception_classes import (ReconnectLimitExceededError,
+                                       InvalidOrEmptyOrderBookError,
+                                       BaseArbitrageCalcException,
+                                       InsufficientOrderBookVolumeError)
 
 
 class ExchangeInstrument:
@@ -28,11 +25,11 @@ class ExchangeInstrument:
     exchanges_instances_dict = {}  # Словарь с экземплярами бирж
     balance_manager = None
     task_manager = None
-    exchange_instruments_obj_dict = {} # Словарь с экземплярами класса ExchangeInstrument вида {symbol: {exchange_id: {obj: instance, task_name: task_name}}}
+    exchange_instruments_obj_dict = {}  # Словарь с экземплярами класса ExchangeInstrument вида {symbol: {exchange_id: {obj: instance, task_name: task_name}}}
     swap_processed_data_dict = None
     swap_raw_data_dict = None
     orderbook_updating_status_dict = {}
-    get_ex_orderbook_data_count = {} # Словарь счетчиков пришедших стаканов целевого символа заданной биржи
+    get_ex_orderbook_data_count = {}  # Словарь счетчиков пришедших стаканов целевого символа заданной биржи
     _configured = False
 
     _lock: asyncio.Lock | None = None
@@ -62,13 +59,12 @@ class ExchangeInstrument:
         cls._configured = True
         return True
 
-
     def __init__(self, exchange_instance, symbol, orderbook_queue: asyncio.Queue, statistic_queue: asyncio.Queue = None):
         self.symbol = symbol
         self.exchange = exchange_instance
         self.exchange_id = exchange_instance.id
         self.orderbook_queue = orderbook_queue
-        self.static_queue = statistic_queue
+        self.statistic_queue = statistic_queue
         self.orderbook_updating = False
         self.fee = None
         self.min_amount = None
@@ -118,9 +114,9 @@ class ExchangeInstrument:
                     if not await bm.is_balance_valid():
                         await asyncio.sleep(5)
                         continue
-
+                    symbol_task_name = asyncio.current_task()
+                    print(f"Имя задачи: {symbol_task_name.get_name()}")
                     max_deal_volume = self.balance_manager.max_deal_volume
-
 
                     # --- WebSocket и вычисления вне блокировки ---
                     orderbook = await self.exchange.watchOrderBook(self.symbol)
@@ -215,7 +211,7 @@ class ExchangeInstrument:
                             ticks_changed = 0
 
                             try:
-                                await self.statistic_queue.put_nowait({self.symbol: {self.exchange_id: statistics_dict}})
+                                self.statistic_queue.put_nowait({self.symbol: {self.exchange_id: statistics_dict}})
                             except asyncio.QueueFull:
                                 try:
                                     _ = self.statistic_queue.get_nowait()
@@ -248,23 +244,25 @@ class ExchangeInstrument:
         finally:
             self.__class__.orderbook_updating_status_dict.setdefault(self.exchange_id, {})[self.symbol] = False
 
+
 class ArbitrageManager:
     _lock = asyncio.Lock()
-    exchanges_instances_dict = {}    # Словарь с экземплярами бирж
+    exchanges_instances_dict = {}  # Словарь с экземплярами бирж
     arbitrage_obj_dict = {}
+    symbol_arbitrage_enable_flag_dict = {} # Словарь флагов для while вида {symbol: True/False}
     task_manager = None
     balance_manager = None
     max_deal_slots = None
-    free_deals_slots = None         # Количество доступных слотов сделок (активная сделка занимает один слот).
-                                    # Открытия сделки доступно пока есть свободный слот.
-    swap_processed_data_dict = {}   # Словарь с данными символов для создания объектов класса
-    swap_raw_data_dict       = {}   # Словарь с сырыми данными по символу с маркета
+    free_deals_slots = None  # Количество доступных слотов сделок (активная сделка занимает один слот).
+    # Открытия сделки доступно пока есть свободный слот.
+    swap_processed_data_dict = {}  # Словарь с данными символов для создания объектов класса
+    swap_raw_data_dict = {}  # Словарь с сырыми данными по символу с маркета
 
     _configured = False
 
     @classmethod
     def get_configure(cls, *, exchanges_instances_dict=None, balance_manager=None,
-                  task_manager=None, swap_raw_data_dict = None, swap_processed_data_dict = None, max_deal_slots=None):
+                      task_manager=None, swap_raw_data_dict=None, swap_processed_data_dict=None, max_deal_slots=None):
         if cls._configured:
             raise RuntimeError("ArbitrageManager уже настроен")
         if exchanges_instances_dict is not None:
@@ -293,12 +291,20 @@ class ArbitrageManager:
             cls.task_manager.add_task(name=task_name, coro_func=instance.symbol_arbitrage)
 
     # init символа-экземпляра
-    def __init__(self,symbol, deal_data):
+    def __init__(self, symbol, deal_data):
         self.symbol = symbol
         self.deal_data = deal_data
         self.task_manager = self.__class__.task_manager
         self.orderbook_queue = asyncio.Queue()
         self.statistic_queue = asyncio.Queue()
+        self.symbol_average_price_dict = {} # Словарь со средними ценами символа на каждой бирже вида {exchange_id: {ask: ask, bid: bid}}
+
+        self.min_ask = Decimal('+Infinity')
+        self.min_ask_exchange = ""
+        self.max_bid = Decimal('-Infinity')
+        self.max_bid_exchange = ""
+        self.best_close_ask = Decimal('+Infinity')
+        self.best_close_bid = Decimal('-Infinity')
 
 
     # Точка выхода в символ-экземпляр класса
@@ -307,7 +313,11 @@ class ArbitrageManager:
         symbol_task_name = asyncio.current_task()
         print(f"Имя задачи: {symbol_task_name.get_name()}")
 
-        # Запустим инициализацию задач нижнего класса текущего символа на биржах из словаря
+        # Инициализация словаря разрешений
+        type(self).symbol_arbitrage_enable_flag_dict[self.symbol] = True
+
+        # Запустим инициализацию задач нижнего класса текущего символа на биржах из словаря.
+        # Запускаем в работу все биржи по данному символу
         for exchange_id in self.__class__.swap_processed_data_dict[self.symbol].keys():
             exchange_instance = self.exchanges_instances_dict.get(exchange_id)
             _obj = ExchangeInstrument(exchange_instance=exchange_instance,
@@ -321,21 +331,66 @@ class ArbitrageManager:
                 "task_name": task_name,
                 "symbol_task_name": symbol_task_name,
             }
-
+            # Здесь добавляется задача ордербуков
             self.task_manager.add_task(name=task_name, coro_func=_obj.watch_orderbook)
+
+        while type(self).symbol_arbitrage_enable_flag_dict[self.symbol]:
+            orderbook_queue_data = await self.orderbook_queue.get()
+            if "type" in orderbook_queue_data and orderbook_queue_data["type"] != "orderbook_update":
+                if orderbook_queue_data["symbol"] == self.symbol:
+                    queue_exchange_id = orderbook_queue_data["exchange_id"]
+                    average_ask = orderbook_queue_data["average_ask"]
+                    average_bid = orderbook_queue_data["average_bid"]
+                    self.symbol_average_price_dict[queue_exchange_id] = {
+                        "average_ask": average_ask,
+                        "average_bid": average_bid
+                    }
+
+            # Определим лучшие цены символа на разных биржах
+            if len(self.symbol_average_price_dict) > 2:
+                for exchange_id, data in self.symbol_average_price_dict.items():
+                    if data["average_ask"] < self.min_ask:
+                        self.min_ask = data["average_ask"]
+                        self.min_ask_exchange = exchange_id
+                        if data["average_bid"] > self.best_close_bid:
+                            self.best_close_bid = data["average_bid"]
+
+                    if data["average_bid"] > self.max_bid:
+                        self.max_bid = data["average_ask"]
+                        self.max_bid_exchange = exchange_id
+                        if data["average_ask"] > self.best_close_ask:
+                            self.best_close_ask = data["average_ask"]
+
+            if self.best_close_ask > self.symbol_average_price_dict[self.max_bid_exchange]["average_ask"]:
+                self.best_close_ask = self.symbol_average_price_dict[self.max_bid_exchange]["average_ask"]
+
+            if self.best_close_bid > self.symbol_average_price_dict[self.min_ask_exchange]["average_bid"]:
+                self.best_close_bid = self.symbol_average_price_dict[self.min_ask_exchange]["average_bid"]
+
+
+            self.open_ratio = round_down(100 * (self.max_bid - self.min_ask) / self.min_ask, 2)
+            self.close_ratio = round_down(100 * (self.best_close_bid - self.best_close_ask) / self.best_close_ask, 2)
+
+            if self.open_ratio > 1:
+                print(self.open_ratio, self.min_ask_exchange, self.max_bid_exchange)
+
+
+
+
+
 
 
 async def main():
-    TASK_MANAGER                = TaskManager()
-    MAX_DEAL_SLOTS              = to_decimal('2')
-    EXCHANGE_ID_LIST            = ["gateio", "okx", "poloniex"]
+    TASK_MANAGER = TaskManager()
+    MAX_DEAL_SLOTS = to_decimal('2')
+    EXCHANGE_ID_LIST = ["okx","gateio","htx"]
 
     BalanceManager.task_manager = TASK_MANAGER
     BalanceManager.max_deal_slots = MAX_DEAL_SLOTS
 
-    exchange_instance_dict      = {}  # Словарь с экземплярами бирж {symbol:{exchange_obj}}
-    swap_raw_data_dict          = {}  # Словарь с сырыми данными {symbol:{exchange_id: <data>}})
-    swap_processed_data_dict    = {}  # Словарь с данными для открытия сделок
+    exchange_instance_dict = {}  # Словарь с экземплярами бирж {symbol:{exchange_obj}}
+    swap_raw_data_dict = {}  # Словарь с сырыми данными {symbol:{exchange_id: <data>}})
+    swap_processed_data_dict = {}  # Словарь с данными для открытия сделок
 
     # Основной контекст запуск экземпляров из списка бирж
     async with AsyncExitStack() as stack:
@@ -363,7 +418,7 @@ async def main():
             # Если символ только на одной бирже, он не попадает в переработанный словарь
             if len(volume) < 2:
                 continue
-            max_contractSize = 0 # Максимальный размер единичного контракта среди бирж символа
+            max_contractSize = 0  # Максимальный размер единичного контракта среди бирж символа
             # объем сделки должен быть рассчитан исходя из максимального размера контрактов в группе и кратен максимальному размеру
             # Мне кажется максимальный размер контракта имеет смысл вычислять оперативно при возникновении арбитража: возник - смотрим максимальный контракт и делаем последние вычисления
             for exchange_id, data in volume.items():
@@ -385,14 +440,14 @@ async def main():
         for symbol in list(swap_raw_data_dict):
             if 'gateio' in swap_raw_data_dict[symbol]:
                 c1 += 1
-            if 'poloniex' in swap_raw_data_dict[symbol]:
+            if 'htx' in swap_raw_data_dict[symbol]:
                 c2 += 1
             if 'okx' in swap_raw_data_dict[symbol]:
                 c3 += 1
 
-        pprint(swap_raw_data_dict)
+        # pprint(swap_raw_data_dict)
 
-        #Инициализация аргументов класса ArbitrageManager и ExchangeInstrument
+        # Инициализация аргументов класса ArbitrageManager и ExchangeInstrument
         if swap_processed_data_dict and swap_raw_data_dict:
             ArbitrageManager.get_configure(
                 exchanges_instances_dict=exchange_instance_dict,
@@ -412,7 +467,7 @@ async def main():
                 swap_processed_data_dict=swap_processed_data_dict
             )
 
-            await ArbitrageManager.create_all_arbitrage_objects() # Основная точка входа в класс ArbitrageManager
+            await ArbitrageManager.create_all_arbitrage_objects()  # Основная точка входа в класс ArbitrageManager
         print(len(swap_raw_data_dict))
         print(c1, c2, c3)
 
@@ -426,6 +481,7 @@ async def main():
             pass
 
         await stop_event.wait()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
