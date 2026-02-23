@@ -82,7 +82,7 @@ class ExchangeInstrument:
     async def watch_orderbook(self):
         """
         Асинхронно следит за стаканом указанного символа.
-        Логика переподключений и проверки валидности баланса минимально блокирует общие данные.
+        Добавлена расширенная диагностика.
         """
         max_reconnect_attempts = 5
         reconnect_attempts = 0
@@ -95,42 +95,39 @@ class ExchangeInstrument:
         window_start_ts = time.monotonic()
         ticks_total = 0
         ticks_changed = 0
-        statistics_dict = {}
 
         try:
-            print(self.symbol, self.exchange_id)
-            # Ждем, пока баланс инициализируется
+            print(f"[{self.exchange_id}] START watch_orderbook for {self.symbol}")
+
             await self.balance_manager.get_balance_instance(self.exchange_id).wait_initialized()
 
-            # Флаг бесконечной подписки
             self.__class__.orderbook_updating_status_dict.setdefault(self.exchange_id, {})[self.symbol] = True
             self.get_ex_orderbook_data_count.setdefault(self.exchange_id, {})[self.symbol] = 0
 
             while self.__class__.orderbook_updating_status_dict[self.exchange_id][self.symbol]:
+
                 try:
-                    # Берем данные, требующие блокировки, атомарно
                     bm = self.balance_manager.get_balance_instance(self.exchange_id)
 
                     if not await bm.is_balance_valid():
-                        await asyncio.sleep(5)
-                        continue
-                    symbol_task_name = asyncio.current_task()
-                    print(f"Имя задачи: {symbol_task_name.get_name()}")
+                        bal = await bm.get_balance()
+                        cprint.warning_r(
+                            f"[{self.exchange_id}] balance invalid, but continuing; current_balance={bal}"
+                        )
+                        # НЕ continue — просто читаем стакан дальше
+
                     max_deal_volume = self.balance_manager.max_deal_volume
 
-                    # --- WebSocket и вычисления вне блокировки ---
+                    # --- WebSocket ---
                     orderbook = await self.exchange.watchOrderBook(self.symbol)
+
+                    # RAW тик
+                    # print(f"[{self.exchange_id}] TICK_RAW ts={time.monotonic()}")
+
                     if not isinstance(orderbook, dict) or 'asks' not in orderbook or 'bids' not in orderbook:
                         raise InvalidOrEmptyOrderBookError(
                             exchange_id=self.exchange_id, symbol=self.symbol, orderbook_data=orderbook
                         )
-
-                    # Счётчики и статистика
-
-                    if self.exchange_id not in self.get_ex_orderbook_data_count:
-                        self.get_ex_orderbook_data_count[self.exchange_id] = {}
-                    if self.symbol not in self.get_ex_orderbook_data_count[self.exchange_id]:
-                        self.get_ex_orderbook_data_count[self.exchange_id][self.symbol] = 0
 
                     self.get_ex_orderbook_data_count[self.exchange_id][self.symbol] += 1
                     reconnect_attempts = 0
@@ -142,27 +139,25 @@ class ExchangeInstrument:
                     new_bid = tuple(map(tuple, orderbook['bids'][:depth]))
 
                     if new_ask != old_ask or new_bid != old_bid:
+                        # print(f"[{self.exchange_id}] CHANGE depth10")
                         ticks_changed += 1
                         new_count += 1
 
-                        # Расчёт средних цен
                         try:
-                            average_ask = get_average_orderbook_price(orderbook['asks'],
-                                                                      money=max_deal_volume,
-                                                                      is_ask=True,
-                                                                      log=True,
-                                                                      exchange=self.exchange_id,
-                                                                      symbol=self.symbol)
-                            average_bid = get_average_orderbook_price(orderbook['bids'],
-                                                                      money=max_deal_volume,
-                                                                      is_ask=False,
-                                                                      log=True,
-                                                                      exchange=self.exchange_id,
-                                                                      symbol=self.symbol)
+                            average_ask = get_average_orderbook_price(
+                                orderbook['asks'], money=max_deal_volume,
+                                is_ask=True, log=True,
+                                exchange=self.exchange_id, symbol=self.symbol
+                            )
+                            average_bid = get_average_orderbook_price(
+                                orderbook['bids'], money=max_deal_volume,
+                                is_ask=False, log=True,
+                                exchange=self.exchange_id, symbol=self.symbol
+                            )
                         except InsufficientOrderBookVolumeError as e:
-                            cprint.warning(f"[SKIP] Недостаточный объём стакана для {self.symbol} биржи {self.exchange_id}: {e}")
+                            print(f"[{self.exchange_id}] SKIP insufficient volume: {e}")
                             await asyncio.sleep(0)
-                            break
+                            continue
 
                         if average_ask is not None and average_bid is not None:
                             output_data = {
@@ -180,7 +175,6 @@ class ExchangeInstrument:
                             old_ask = new_ask
                             old_bid = new_bid
 
-                            # Отправка в очередь без блокировки
                             try:
                                 self.orderbook_queue.put_nowait(output_data)
                             except asyncio.QueueFull:
@@ -190,58 +184,55 @@ class ExchangeInstrument:
                                     pass
                                 await self.orderbook_queue.put(output_data)
 
-                    # --- статистика по тику ---
-                    if self.statistic_queue:
-                        now = time.monotonic()
-                        if now - window_start_ts >= TICK_WINDOW_SEC:
-                            statistics_dict = {
-                                "type": "tick_stats",
-                                "symbol": self.symbol,
-                                "exchange_id": self.exchange_id,
-                                "window_sec": TICK_WINDOW_SEC,
-                                "ticks_total": ticks_total,
-                                "ticks_changed": ticks_changed,
-                                "ticks_per_sec": round(ticks_total / TICK_WINDOW_SEC, 2),
-                                "changed_per_sec": round(ticks_changed / TICK_WINDOW_SEC, 2),
-                                "ts_from": window_start_ts,
-                                "ts_to": now,
-                            }
-                            window_start_ts = now
-                            ticks_total = 0
-                            ticks_changed = 0
-
-                            try:
-                                self.statistic_queue.put_nowait({self.symbol: {self.exchange_id: statistics_dict}})
-                            except asyncio.QueueFull:
-                                try:
-                                    _ = self.statistic_queue.get_nowait()
-                                except asyncio.QueueEmpty:
-                                    pass
-                                await self.statistic_queue.put({self.symbol: {self.exchange_id: statistics_dict}})
+                    # --- статистика ---
+                    now = time.monotonic()
+                    if now - window_start_ts >= TICK_WINDOW_SEC:
+                        print(f"[{self.exchange_id}] TICK_STATS total={ticks_total} changed={ticks_changed}")
+                        window_start_ts = now
+                        ticks_total = 0
+                        ticks_changed = 0
 
                 except Exception as e:
-                    error_str = str(e)
+                    print(f"[{self.exchange_id}][EXCEPTION_LOOP] {repr(e)}")
+                    print(f"[{self.exchange_id}][EXCEPTION_TYPE] {type(e)}")
+
+                    import traceback
+                    traceback.print_exc()
+
                     transient_errors = [
                         '1000', 'closed by remote server', 'Cannot write to closing transport',
                         'Connection closed', 'WebSocket is already closing', 'Transport closed',
                         'broken pipe', 'reset by peer'
                     ]
 
-                    if any(x in error_str for x in transient_errors):
+                    is_transient = any(x in str(e) for x in transient_errors)
+                    print(f"[{self.exchange_id}][TRANSIENT_MATCH] {is_transient}")
+
+                    if is_transient:
                         reconnect_attempts += 1
+                        print(f"[{self.exchange_id}][RECONNECT] attempt {reconnect_attempts}")
+
                         if reconnect_attempts > max_reconnect_attempts:
-                            raise ReconnectLimitExceededError(exchange_id=self.exchange.id, symbol=self.symbol, attempts=reconnect_attempts)
+                            print(f"[{self.exchange_id}][RECONNECT_LIMIT] exceeded")
+                            raise ReconnectLimitExceededError(
+                                exchange_id=self.exchange.id,
+                                symbol=self.symbol,
+                                attempts=reconnect_attempts
+                            )
+
                         await asyncio.sleep(4 + (2 ** reconnect_attempts))
                         continue
+
+                    print(f"[{self.exchange_id}][FATAL_ERROR] stopping")
                     raise
 
-        except asyncio.CancelledError:
-            cprint.success_w(f"[watch_orderbook] Задача отменена: {self.symbol}")
-            raise
         except Exception as e:
-            cprint.error_b(f"[watch_orderbook][FATAL] Ошибка для {self.symbol}: {e}")
-            raise
+            print(f"[{self.exchange_id}][FATAL] watch_orderbook crashed: {repr(e)}")
+            import traceback
+            traceback.print_exc()
+
         finally:
+            print(f"[{self.exchange_id}][STOPPED] watch_orderbook finished")
             self.__class__.orderbook_updating_status_dict.setdefault(self.exchange_id, {})[self.symbol] = False
 
 
@@ -310,69 +301,94 @@ class ArbitrageManager:
     # Точка выхода в символ-экземпляр класса
     # Здесь происходит основная оценка арбитража и принятие решений, анализ и статистика символа и отсюда отправка на вывод в таблицу
     async def symbol_arbitrage(self):
+
         symbol_task_name = asyncio.current_task()
         print(f"Имя задачи: {symbol_task_name.get_name()}")
 
-        # Инициализация словаря разрешений
         type(self).symbol_arbitrage_enable_flag_dict[self.symbol] = True
 
-        # Запустим инициализацию задач нижнего класса текущего символа на биржах из словаря.
-        # Запускаем в работу все биржи по данному символу
+        print("------------------------------")
+        pprint(self.__class__.swap_processed_data_dict)
+        print("------------------------------")
+
+        # Запуск задач ордербуков
         for exchange_id in self.__class__.swap_processed_data_dict[self.symbol].keys():
             exchange_instance = self.exchanges_instances_dict.get(exchange_id)
-            _obj = ExchangeInstrument(exchange_instance=exchange_instance,
-                                      symbol=self.symbol,
-                                      orderbook_queue=self.orderbook_queue,
-                                      statistic_queue=self.statistic_queue)
+            _obj = ExchangeInstrument(
+                exchange_instance=exchange_instance,
+                symbol=self.symbol,
+                orderbook_queue=self.orderbook_queue,
+                statistic_queue=self.statistic_queue
+            )
             task_name = f"_OrderbookTask|{self.symbol}|{exchange_id}"
-            ExchangeInstrument.exchange_instruments_obj_dict.setdefault(self.symbol, {}).setdefault(exchange_id, {})
+
+            ExchangeInstrument.exchange_instruments_obj_dict.setdefault(self.symbol, {}) \
+                .setdefault(exchange_id, {})
+
             ExchangeInstrument.exchange_instruments_obj_dict[self.symbol][exchange_id] = {
                 "obj": _obj,
                 "task_name": task_name,
                 "symbol_task_name": symbol_task_name,
             }
-            # Здесь добавляется задача ордербуков
+
             self.task_manager.add_task(name=task_name, coro_func=_obj.watch_orderbook)
 
+        # Основной цикл
         while type(self).symbol_arbitrage_enable_flag_dict[self.symbol]:
+
             orderbook_queue_data = await self.orderbook_queue.get()
-            if "type" in orderbook_queue_data and orderbook_queue_data["type"] != "orderbook_update":
-                if orderbook_queue_data["symbol"] == self.symbol:
-                    queue_exchange_id = orderbook_queue_data["exchange_id"]
-                    average_ask = orderbook_queue_data["average_ask"]
-                    average_bid = orderbook_queue_data["average_bid"]
-                    self.symbol_average_price_dict[queue_exchange_id] = {
-                        "average_ask": average_ask,
-                        "average_bid": average_bid
-                    }
 
-            # Определим лучшие цены символа на разных биржах
-            if len(self.symbol_average_price_dict) > 1:
-                for exchange_id, data in self.symbol_average_price_dict.items():
-                    if data["average_ask"] < self.min_ask:
-                        self.min_ask = data["average_ask"]
-                        self.min_ask_exchange = exchange_id
-                        if data["average_bid"] > self.best_close_bid:
-                            self.best_close_bid = data["average_bid"]
+            # DEBUG
+            # print("FROM_QUEUE", self.symbol, orderbook_queue_data.get("exchange_id"), orderbook_queue_data.get("count"))
 
-                    if data["average_bid"] > self.max_bid:
-                        self.max_bid = data["average_bid"]
-                        self.max_bid_exchange = exchange_id
-                        if data["average_ask"] > self.best_close_ask:
-                            self.best_close_ask = data["average_ask"]
+            # Защита от мусора
+            if orderbook_queue_data.get("type") != "orderbook_update":
+                continue
 
-            if self.best_close_ask > self.symbol_average_price_dict[self.max_bid_exchange]["average_ask"]:
-                self.best_close_ask = self.symbol_average_price_dict[self.max_bid_exchange]["average_ask"]
+            queue_exchange_id = orderbook_queue_data.get("exchange_id")
+            if not queue_exchange_id:
+                continue
 
-            if self.best_close_bid > self.symbol_average_price_dict[self.min_ask_exchange]["average_bid"]:
-                self.best_close_bid = self.symbol_average_price_dict[self.min_ask_exchange]["average_bid"]
+            # Обновляем цены
+            self.symbol_average_price_dict[queue_exchange_id] = {
+                "average_ask": orderbook_queue_data["average_ask"],
+                "average_bid": orderbook_queue_data["average_bid"]
+            }
 
+            print(queue_exchange_id, orderbook_queue_data)
 
-            self.open_ratio = round_down(100 * (self.max_bid - self.min_ask) / self.min_ask, 2)
-            self.close_ratio = round_down(100 * (self.best_close_bid - self.best_close_ask) / self.best_close_ask, 2)
+            # Нужно минимум 2 биржи
+            if len(self.symbol_average_price_dict) < 2:
+                continue
 
-            if self.open_ratio > 1:
-                print(self.open_ratio, self.min_ask_exchange, self.max_bid_exchange)
+            # Инициализация
+            min_ask = Decimal('+Infinity')
+            max_bid = Decimal('-Infinity')
+            min_ask_ex = None
+            max_bid_ex = None
+
+            # Поиск лучших цен
+            for ex_id, data in self.symbol_average_price_dict.items():
+                ask = data["average_ask"]
+                bid = data["average_bid"]
+
+                if ask < min_ask:
+                    min_ask = ask
+                    min_ask_ex = ex_id
+
+                if bid > max_bid:
+                    max_bid = bid
+                    max_bid_ex = ex_id
+
+            # Если что-то не определилось — пропускаем
+            if not min_ask_ex or not max_bid_ex:
+                continue
+
+            # Расчёт
+            open_ratio = round_down(100 * (max_bid - min_ask) / min_ask, 2)
+
+            if open_ratio > 1:
+                print(open_ratio, min_ask_ex, max_bid_ex)
 
 
 
@@ -383,7 +399,7 @@ class ArbitrageManager:
 async def main():
     TASK_MANAGER = TaskManager()
     MAX_DEAL_SLOTS = to_decimal('2')
-    EXCHANGE_ID_LIST = ["okx","gateio","htx"]
+    EXCHANGE_ID_LIST = ["okx", "htx", "gateio"]
 
     BalanceManager.task_manager = TASK_MANAGER
     BalanceManager.max_deal_slots = MAX_DEAL_SLOTS
@@ -418,18 +434,22 @@ async def main():
             # Если символ только на одной бирже, он не попадает в переработанный словарь
             if len(volume) < 2:
                 continue
-            max_contractSize = 0  # Максимальный размер единичного контракта среди бирж символа
-            # объем сделки должен быть рассчитан исходя из максимального размера контрактов в группе и кратен максимальному размеру
-            # Мне кажется максимальный размер контракта имеет смысл вычислять оперативно при возникновении арбитража: возник - смотрим максимальный контракт и делаем последние вычисления
-            for exchange_id, data in volume.items():
-                contractSize = data.get('contractSize')
-                if max_contractSize < contractSize:
-                    max_contractSize = contractSize
-                swap_processed_data_dict.setdefault(symbol, {}).setdefault(exchange_id, {})['contractSize'] = contractSize
-            for exchange_id, data in volume.items():
-                swap_processed_data_dict[symbol][exchange_id]['max_contractSize'] = max_contractSize
+            if symbol == 'BTC/USDT:USDT':
+                max_contractSize = 0  # Максимальный размер единичного контракта среди бирж символа
+                # объем сделки должен быть рассчитан исходя из максимального размера контрактов в группе и кратен максимальному размеру
+                # Мне кажется максимальный размер контракта имеет смысл вычислять оперативно при возникновении арбитража: возник - смотрим максимальный контракт и делаем последние вычисления
+                for exchange_id, data in volume.items():
+                    contractSize = data.get('contractSize')
+                    if max_contractSize < contractSize:
+                        max_contractSize = contractSize
+                    swap_processed_data_dict.setdefault(symbol, {}).setdefault(exchange_id, {})['contractSize'] = contractSize
+                for exchange_id, data in volume.items():
+                    swap_processed_data_dict[symbol][exchange_id]['max_contractSize'] = max_contractSize
 
-        # pprint(swap_processed_data_dict)
+        print("*****************************")
+        pprint(swap_processed_data_dict)
+        print("*****************************")
+
 
         for symbol in list(swap_raw_data_dict):
             if len(swap_raw_data_dict[symbol]) < 2:
