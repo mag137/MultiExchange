@@ -1,4 +1,4 @@
-__version__ = '2.1'
+__version__ = '3.0'
 # Класс выполнен по паттерну Multiton
 import asyncio
 import time
@@ -17,7 +17,9 @@ class BalanceManager:
     _lock: asyncio.Lock | None = None
 
     RETRY_DELAY: float = 3.0
-    BALANCE_REQUEST_TIMEOUT: float = 20.0
+
+    # УБИРАЕМ BALANCE_REQUEST_TIMEOUT
+    # BALANCE_REQUEST_TIMEOUT: float = 20.0
 
     min_balance: Optional[Decimal] = None
     exchange_min_balance: Optional[Decimal] = None
@@ -29,7 +31,6 @@ class BalanceManager:
     @classmethod
     def create_new_balance_obj(cls, exchange):
         exchange_id = exchange.id
-        # Если экземпляр для этой биржи уже есть в словаре
         if exchange_id in cls.exchange_balance_instance_dict:
             msg = f"[BalanceManager][create_new_balance_obj] - биржа '{exchange_id}': Попытка создать уже существующий экземпляр"
             cprint.error_w(msg)
@@ -59,7 +60,6 @@ class BalanceManager:
             await self.__class__._volume_ready_event.wait()
 
     async def _compute_volume(self):
-        # Вычисляем минимальный баланс и max_deal_volume
         await self.__class__.get_min_balance()
         if self.__class__._volume_ready_event is None:
             self.__class__._volume_ready_event = asyncio.Event()
@@ -69,43 +69,29 @@ class BalanceManager:
     def remove(cls, exchange_id):
         cls.exchange_balance_instance_dict.pop(exchange_id, None)
 
-    # Для создания экземпляра менеджера просто передаем в него экземпляр биржи
     def __init__(self, exchange):
         self.exchange = exchange
         self.exchange_id = exchange.id
         self.enable: bool = True
 
-        # Баланс текущей биржи
         self.exchange_balance: Optional[Decimal] = None
 
-        # Минимальный баланс среди всех бирж из экземпляров
         self.min_balance: Optional[Decimal] = self.__class__.min_balance
-
-        # Название биржи с минимальным балансом
         self.exchange_min_balance: Optional[Decimal] = self.__class__.exchange_min_balance
-
-        # Расчетный максимальный объем сделки
         self.max_deal_volume: Optional[Decimal] = self.__class__.max_deal_volume
-
 
         self._lock = asyncio.Lock()
         self._initialized_event = asyncio.Event()
-        self._last_request_ts: Optional[float] = None
 
         self.task_name: str = f"_BalanceTask|{self.exchange_id}"
         if self.__class__.task_manager:
             self.__class__.task_manager.add_task(name=self.task_name, coro_func=self._watch_balance)
 
-    # POST-запрос баланса (разовый)
     async def _fetch_balance(self) -> None:
         while self.enable:
             try:
                 cprint.info_b(f"[BalanceManager][{self.exchange_id}] Fetching initial balance snapshot...")
-                self._last_request_ts = time.monotonic()
-                balance_data = await asyncio.wait_for(
-                    self.exchange.fetch_balance({"type": "swap"}),
-                    timeout=self.BALANCE_REQUEST_TIMEOUT,
-                )
+                balance_data = await self.exchange.fetch_balance({"type": "swap"})
                 free_dict = balance_data.get("free", {})
                 value = free_dict.get("USDT") or free_dict.get("usdt")
 
@@ -114,29 +100,29 @@ class BalanceManager:
                 self._initialized_event.set()
                 cprint.success_w(f"[BalanceManager][{self.exchange_id}] Initial balance loaded")
                 return
-            except asyncio.TimeoutError:
-                cprint.warning_r(f"[BalanceManager][{self.exchange_id}] Initial fetch timed out")
             except Exception as e:
                 cprint.error_b(f"[BalanceManager][{self.exchange_id}] Initial fetch failed: {e}")
             await asyncio.sleep(self.RETRY_DELAY)
 
-    # WebSocket-запрос баланса (подписка)
     async def _watch_balance(self) -> None:
         await self._fetch_balance()
-        await self._compute_volume()  # сразу после первого fetch
+        await self._compute_volume()
 
         retry_attempts = 0
         max_backoff = 60
-        old_value = to_decimal(0)
+        old_value = self.exchange_balance
+
         while self.enable:
             try:
                 balance_data = await self.exchange.watch_balance({"type": "swap"})
                 free_dict = balance_data.get("free", {})
                 value = free_dict.get("USDT") or free_dict.get("usdt")
+
+                # Обновляем баланс только если изменился
                 if value != old_value:
                     old_value = value
                     await self._update_balance(value)
-                    await self._compute_volume()  # обновляем min_balance и max_deal_volume при изменении баланса
+                    await self._compute_volume()
 
                 retry_attempts = 0
 
@@ -155,7 +141,6 @@ class BalanceManager:
     async def _update_balance(self, value) -> None:
         dec_value = to_decimal(value) if value is not None else None
         async with self._lock:
-            self._last_request_ts = time.monotonic()
             if self.exchange_balance != dec_value:
                 self.exchange_balance = dec_value
                 cprint.success_w(
@@ -168,42 +153,48 @@ class BalanceManager:
 
     async def is_balance_valid(self) -> bool:
         async with self._lock:
+            # Баланс должен быть получен
             if self.exchange_balance is None:
                 return False
-            if self._last_request_ts is None:
+
+            # Баланс должен быть > 0
+            if self.exchange_balance <= 0:
                 return False
-            return (time.monotonic() - self._last_request_ts) <= self.BALANCE_REQUEST_TIMEOUT
+
+            # Баланс валиден
+            return True
 
     @classmethod
     async def get_min_balance(cls) -> tuple[Optional[str], Optional[Decimal]]:
         min_balance = Decimal("Infinity")
         min_exchange_id = None
+
         for exchange_id, obj in cls.exchange_balance_instance_dict.items():
             balance = await obj.get_balance()
-            if balance is None or not await obj.is_balance_valid():
+            if balance is None:
                 continue
-            if not await obj.is_balance_valid():
-                continue
-            balance = await obj.get_balance()
-            if balance is not None and balance < min_balance:
+            if balance < min_balance:
                 min_balance = balance
                 min_exchange_id = exchange_id
 
         cls.min_balance = min_balance
         cls.exchange_min_balance = min_exchange_id
+
         if min_exchange_id is None:
             return None, None
+
         if cls.max_deal_slots:
             cls.max_deal_volume = to_decimal('0.9') * cls.min_balance / cls.max_deal_slots
-            # Синхронизация с экземплярами
+
             for obj in cls.exchange_balance_instance_dict.values():
                 obj.min_balance = cls.min_balance
                 obj.exchange_min_balance = cls.exchange_min_balance
                 obj.max_deal_volume = cls.max_deal_volume
+
         return min_exchange_id, min_balance
 
 async def main():
-    exchange_id_list = ["okx", "htx"]
+    exchange_id_list = ["okx", "htx", "gateio"]
     BalanceManager.task_manager = TaskManager()
     BalanceManager.max_deal_slots = to_decimal('2')
     # Запускаем менеджер контекста списка бирж - получаем контекст списка экземпляров бирж
