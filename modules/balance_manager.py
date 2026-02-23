@@ -1,4 +1,4 @@
-__version__ = '3.0'
+__version__ = '3.1'
 # Класс выполнен по паттерну Multiton
 import asyncio
 import time
@@ -93,7 +93,7 @@ class BalanceManager:
                 cprint.info_b(f"[BalanceManager][{self.exchange_id}] Fetching initial balance snapshot...")
                 balance_data = await self.exchange.fetch_balance({"type": "swap"})
                 free_dict = balance_data.get("free", {})
-                value = free_dict.get("USDT") or free_dict.get("usdt")
+                value = free_dict.get("USDT", free_dict.get("usdt"))
 
                 await self._update_balance(value)
 
@@ -140,6 +140,12 @@ class BalanceManager:
 
     async def _update_balance(self, value) -> None:
         dec_value = to_decimal(value) if value is not None else None
+
+        # ❗ Защита: игнорируем None
+        if dec_value is None:
+            cprint.warning_r(f"[BalanceManager][{self.exchange_id}] Ignoring None balance update")
+            return
+
         async with self._lock:
             if self.exchange_balance != dec_value:
                 self.exchange_balance = dec_value
