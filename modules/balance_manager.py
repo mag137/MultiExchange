@@ -1,4 +1,4 @@
-__version__ = '3.1'
+__version__ = '3.2'
 # Класс выполнен по паттерну Multiton
 import asyncio
 import time
@@ -107,6 +107,9 @@ class BalanceManager:
     async def _watch_balance(self) -> None:
         await self._fetch_balance()
         await self._compute_volume()
+        if self.exchange_id == "htx":
+            cprint.warning_r(f"[BalanceManager][htx] WebSocket disabled, using REST only")
+            return
 
         retry_attempts = 0
         max_backoff = 60
@@ -127,6 +130,11 @@ class BalanceManager:
                 retry_attempts = 0
 
             except asyncio.CancelledError:
+                raise
+            except KeyError as e:
+                if 'auth' in str(e):
+                    await asyncio.sleep(self.RETRY_DELAY)
+                    continue
                 raise
             except Exception as e:
                 retry_attempts += 1
@@ -200,8 +208,10 @@ class BalanceManager:
         return min_exchange_id, min_balance
 
 async def main():
-    exchange_id_list = ["okx", "htx", "gateio"]
-    BalanceManager.task_manager = TaskManager()
+
+    exchange_id_list = ["htx","okx",  "gateio"]
+    task_manager = TaskManager()
+    BalanceManager.task_manager = task_manager
     BalanceManager.max_deal_slots = to_decimal('2')
     # Запускаем менеджер контекста списка бирж - получаем контекст списка экземпляров бирж
     async with AsyncExitStack() as stack:
@@ -214,8 +224,7 @@ async def main():
             BalanceManager.create_new_balance_obj(exchange)
 
         # Ждём инициализации балансов
-        for exchange_id, bm in BalanceManager.exchange_balance_instance_dict.items():
-            await bm.wait_initialized()
+        await asyncio.gather( *(bm.wait_initialized() for bm in BalanceManager.exchange_balance_instance_dict.values()) )
 
         # Получаем минимальный баланс
         min_ex_id, min_balance = await BalanceManager.get_min_balance()
