@@ -1,7 +1,7 @@
-__version__ = '3.2'
+__version__ = '4.0'
 # Класс выполнен по паттерну Multiton
 import asyncio
-import time
+import sys
 from decimal import Decimal
 from typing import Dict, Optional
 from contextlib import AsyncExitStack
@@ -27,17 +27,6 @@ class BalanceManager:
     max_deal_slots: Optional[Decimal] = None
 
     _volume_ready_event: asyncio.Event | None = None
-
-    @classmethod
-    def create_new_balance_obj(cls, exchange):
-        exchange_id = exchange.id
-        if exchange_id in cls.exchange_balance_instance_dict:
-            msg = f"[BalanceManager][create_new_balance_obj] - биржа '{exchange_id}': Попытка создать уже существующий экземпляр"
-            cprint.error_w(msg)
-            raise RuntimeError(msg)
-        instance = cls(exchange)
-        cls.exchange_balance_instance_dict[exchange_id] = instance
-        return instance
 
     @classmethod
     def _get_lock(cls):
@@ -83,9 +72,8 @@ class BalanceManager:
         self._lock = asyncio.Lock()
         self._initialized_event = asyncio.Event()
 
-        self.task_name: str = f"_BalanceTask|{self.exchange_id}"
-        if self.__class__.task_manager:
-            self.__class__.task_manager.add_task(name=self.task_name, coro_func=self._watch_balance)
+        self.__class__.exchange_balance_instance_dict[exchange.id] = self
+
 
     async def _fetch_balance(self) -> None:
         while self.enable:
@@ -221,7 +209,10 @@ async def main():
                 ExchangeInstance(ccxt, exchange_id, log=True)
             )
             exchange_dict[exchange_id] = exchange
-            BalanceManager.create_new_balance_obj(exchange)
+            _obj = BalanceManager(exchange)
+            # BalanceManager.create_new_balance_obj(exchange)
+            task_name: str = f"_BalanceTask|{exchange.id}"
+            task_manager.add_task(name=task_name, coro_func=_obj._watch_balance)
 
         # Ждём инициализации балансов
         await asyncio.gather( *(bm.wait_initialized() for bm in BalanceManager.exchange_balance_instance_dict.values()) )
@@ -235,4 +226,7 @@ async def main():
 
 
 if __name__ == "__main__":
+    import asyncio
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())
