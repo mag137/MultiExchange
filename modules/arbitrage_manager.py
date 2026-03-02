@@ -1,4 +1,4 @@
-__version__ = "0.3"
+__version__ = "0.4"
 
 import signal
 
@@ -415,8 +415,10 @@ async def main():
             exchange = await stack.enter_async_context(ExchangeInstance(ccxt, exchange_id, log=True))
             exchange_instance_dict[exchange_id] = exchange
 
-            # Создание объектов баланс-менеджера
-            balance_manager_obj = BalanceManager.create_new_balance_obj(exchange)
+            # Создание и запуск баланс-менеджера
+            balance_manager_obj = BalanceManager(exchange)
+            task_name = f"_BalanceTask|{exchange.id}"
+            TASK_MANAGER.add_task(name=task_name, coro_func=balance_manager_obj._watch_balance)
             # Ожидание инициализации объектов балансов
             await balance_manager_obj.wait_initialized()
 
