@@ -77,7 +77,10 @@ class ExchangeInstrument:
         self.contract_size = self.swap_raw_data_dict.get(self.symbol, {}).get(self.exchange_id).get('contractSize', None)
         self.precision_amount = self.swap_raw_data_dict.get(self.symbol, {}).get(self.exchange_id).get('precision', {}).get('amount', None)
         self.min_amount = self.swap_raw_data_dict.get(self.symbol, {}).get(self.exchange_id).get('limits', {}).get('amount', {}).get('min', None)
-        self.fee = self.swap_raw_data_dict.get(self.symbol, {}).get(self.exchange_id).get('taker_fee', None) or self.swap_raw_data_dict.get(self.symbol, {}).get(self.exchange_id).get('taker', None)
+        swap_data = self.swap_raw_data_dict.get(self.symbol, {}).get(self.exchange_id, {})
+        taker_fee = swap_data.get('taker_fee', None)
+        taker = swap_data.get('taker', None)
+        self.fee = taker_fee if taker_fee is not None else taker
 
     async def watch_orderbook(self):
         """
@@ -187,7 +190,7 @@ class ExchangeInstrument:
                     # --- статистика ---
                     now = time.monotonic()
                     if now - window_start_ts >= TICK_WINDOW_SEC:
-                        print(f"[{self.exchange_id}] TICK_STATS total={ticks_total} changed={ticks_changed}")
+                        print(f"[{self.exchange_id}] TICK_STATS total={ticks_total} changed={ticks_changed} fee = {self.fee * 100} %")
                         window_start_ts = now
                         ticks_total = 0
                         ticks_changed = 0
@@ -247,7 +250,7 @@ class ArbitrageManager:
     free_deals_slots = None  # Количество доступных слотов сделок (активная сделка занимает один слот).
     # Открытия сделки доступно пока есть свободный слот.
     swap_processed_data_dict = {}  # Словарь с данными символов для создания объектов класса
-    swap_raw_data_dict = {}  # Словарь с сырыми данными по символу с маркета
+    swap_raw_data_dict = {}  # Словарь с сырыми данными по символу маркета
 
     _configured = False
 
@@ -355,7 +358,7 @@ class ArbitrageManager:
                 "average_bid": orderbook_queue_data["average_bid"]
             }
 
-            print(queue_exchange_id, orderbook_queue_data)
+            # print(queue_exchange_id, orderbook_queue_data)
 
             # Нужно минимум 2 биржи
             if len(self.symbol_average_price_dict) < 2:
@@ -387,8 +390,8 @@ class ArbitrageManager:
             # Расчёт
             open_ratio = round_down(100 * (max_bid - min_ask) / min_ask, 2)
 
-            if open_ratio > 1:
-                print(open_ratio, min_ask_ex, max_bid_ex)
+            if open_ratio > 0.07:
+                print(open_ratio, min_ask_ex, max_bid_ex, "%")
 
 
 
