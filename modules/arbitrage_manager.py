@@ -1,4 +1,4 @@
-__version__ = "0.4"
+__version__ = "0.5"
 
 import signal
 
@@ -393,12 +393,6 @@ class ArbitrageManager:
             if open_ratio > 0.07:
                 print(open_ratio, min_ask_ex, max_bid_ex, "%")
 
-
-
-
-
-
-
 async def main():
     TASK_MANAGER = TaskManager()
     MAX_DEAL_SLOTS = to_decimal('2')
@@ -413,17 +407,22 @@ async def main():
 
     # Основной контекст запуск экземпляров из списка бирж
     async with AsyncExitStack() as stack:
-
-        for exchange_id in EXCHANGE_ID_LIST:
+        async def open_exchange(exchange_id):
             exchange = await stack.enter_async_context(ExchangeInstance(ccxt, exchange_id, log=True))
-            exchange_instance_dict[exchange_id] = exchange
+            return exchange_id, exchange
 
-            # Создание и запуск баланс-менеджера
+        # Открываем все биржи параллельно
+        results = await asyncio.gather(*(open_exchange(exchange_id) for exchange_id in EXCHANGE_ID_LIST))
+        exchange_instance_dict = dict(results)
+
+        started_balance_managers = []
+
+        # После открытия всех бирж запускаем balance-задачи для всех бирж
+        for exchange_id, exchange in exchange_instance_dict.items():
             balance_manager_obj = BalanceManager(exchange)
             task_name = f"_BalanceTask|{exchange.id}"
             TASK_MANAGER.add_task(name=task_name, coro_func=balance_manager_obj._watch_balance)
-            # Ожидание инициализации объектов балансов
-            await balance_manager_obj.wait_initialized()
+            started_balance_managers.append(balance_manager_obj)
 
             # Сборка сырого словаря с данными по каждому символу на каждой бирже - swap_raw_data_dict
             for pair_data in exchange.spot_swap_pair_data_dict.values():
@@ -433,6 +432,10 @@ async def main():
                     symbol = swap_data["symbol"]
                     if swap_data.get('linear') and not swap_data.get('inverse'):
                         swap_raw_data_dict.setdefault(symbol, {})[exchange_id] = swap_data
+
+        # Ожидание инициализации всех балансов после запуска всех watch-задач.
+        # Так первичные fetch_balance идут одновременно, а не по очереди.
+        await asyncio.gather(*(bm.wait_initialized() for bm in started_balance_managers))
 
         # Парсинг данных для swap_processed_data_dict
         for symbol, volume in swap_raw_data_dict.items():

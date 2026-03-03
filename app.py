@@ -318,9 +318,8 @@ class ArbitragePairs:
                 exchange = cls.exchanges_instance_dict[exchange_id]
                 cls.balance_managers[exchange_id] = BalanceManager(exchange, cls.task_manager)
 
-            # Ожидаем первичную загрузку всех балансов
-            for exchange_id in cls.balance_managers:
-                await cls.balance_managers[exchange_id].wait_initialized()
+            # Ожидаем первичную загрузку всех балансов после старта всех задач
+            await asyncio.gather(*(bm.wait_initialized() for bm in cls.balance_managers.values()))
 
             # Вывод текущих балансов
             for exchange_id in cls.balance_managers.keys():
@@ -398,8 +397,8 @@ async def main():
                     if swap_data.get('linear') and not swap_data.get('inverse'):
                         swap_pair_data_dict.setdefault(symbol, {})[exchange_id] = swap_data
 
-        for bm in balance_managers.values():
-            await bm.wait_initialized()
+        # Ожидаем первичную загрузку всех балансов после старта всех задач
+        await asyncio.gather(*(bm.wait_initialized() for bm in balance_managers.values()))
 
         # pprint(swap_pair_data_dict)
         # Парсинг данных для swap_pair_for_deal_info_dict
@@ -455,5 +454,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
 
