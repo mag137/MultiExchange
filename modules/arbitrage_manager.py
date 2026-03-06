@@ -295,24 +295,42 @@ class ExchangeInstrument:
                         ticks_changed = 0
 
                 except Exception as e:
-                    print(f"[{self.exchange_id}][EXCEPTION_LOOP] {repr(e)}")
-                    print(f"[{self.exchange_id}][EXCEPTION_TYPE] {type(e)}")
+                    method_name = "watchOrderBook"
+                    method_params = {"symbol": self.symbol}
+
+                    print(
+                        f"[{self.exchange_id}][EXCEPTION_LOOP] "
+                        f"method={method_name} params={method_params} error={repr(e)}"
+                    )
+                    print(
+                        f"[{self.exchange_id}][EXCEPTION_TYPE] "
+                        f"method={method_name} params={method_params} type={type(e)}"
+                    )
 
                     import traceback
                     traceback.print_exc()
 
                     transient_errors = [
+                        'RequestTimeout',
+                        'ping-pong keepalive missing on time',
+                        'timed out',
                         '1000', 'closed by remote server', 'Cannot write to closing transport',
                         'Connection closed', 'WebSocket is already closing', 'Transport closed',
                         'broken pipe', 'reset by peer'
                     ]
 
                     is_transient = any(x in str(e) for x in transient_errors)
-                    print(f"[{self.exchange_id}][TRANSIENT_MATCH] {is_transient}")
+                    print(
+                        f"[{self.exchange_id}][TRANSIENT_MATCH] "
+                        f"method={method_name} params={method_params} is_transient={is_transient}"
+                    )
 
                     if is_transient:
                         reconnect_attempts += 1
-                        print(f"[{self.exchange_id}][RECONNECT] attempt {reconnect_attempts}")
+                        print(
+                            f"[{self.exchange_id}][RECONNECT] "
+                            f"method={method_name} params={method_params} attempt={reconnect_attempts}"
+                        )
 
                         if reconnect_attempts > max_reconnect_attempts:
                             print(f"[{self.exchange_id}][RECONNECT_LIMIT] exceeded")
@@ -325,7 +343,10 @@ class ExchangeInstrument:
                         await asyncio.sleep(4 + (2 ** reconnect_attempts))
                         continue
 
-                    print(f"[{self.exchange_id}][FATAL_ERROR] stopping")
+                    print(
+                        f"[{self.exchange_id}][FATAL_ERROR] "
+                        f"method={method_name} params={method_params} stopping"
+                    )
                     raise
 
         except Exception as e:
