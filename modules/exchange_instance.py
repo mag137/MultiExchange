@@ -1,5 +1,5 @@
-__version__ = '6.0'
-
+__version__ = '6.1i'
+# Добавлены фильтры доступности монеты для торговли
 import ssl
 import certifi
 import aiohttp
@@ -236,10 +236,83 @@ class ExchangeInstance:
         # --- Создаём экземпляр MarketsSortData ---
         new_sort_instance = MarketsSortData(markets, log=False)
 
+        def is_tradable_market(market: dict) -> bool:
+            """
+            Унифицированная проверка доступности рынка.
+            Нужна, чтобы исключить из словаря пары инструменты, которые уже не торгуются
+            (например, halted/suspend/offline), но ещё присутствуют в ответе load_markets().
+            """
+            if not isinstance(market, dict):
+                return False
+
+            if market.get("active") is False:
+                return False
+
+            info = market.get("info") or {}
+            # Разные биржи используют разные ключи состояния.
+            raw_states = [
+                info.get("state"),
+                info.get("status"),
+                info.get("contractStatus"),
+                info.get("symbolStatus"),
+            ]
+            states = [
+                str(s).strip().lower()
+                for s in raw_states
+                if s is not None and str(s).strip() != ""
+            ]
+
+            # Если статусы не пришли вообще — считаем инструмент потенциально пригодным.
+            if not states:
+                return True
+
+            # Разрешённые "торгуется" состояния.
+            allowed_states = {
+                "live",
+                "trading",
+                "online",
+                "open",
+                "listed",
+                "normal",
+            }
+
+            # Явно неторгуемые состояния.
+            blocked_states = {
+                "suspend",
+                "suspended",
+                "halt",
+                "halted",
+                "pause",
+                "paused",
+                "offline",
+                "delisted",
+                "settlement",
+                "preopen",
+                "close",
+                "closed",
+                "maintenance",
+            }
+
+            if any(s in blocked_states for s in states):
+                return False
+
+            # Если есть явный позитивный статус — инструмент торгуется.
+            if any(s in allowed_states for s in states):
+                return True
+
+            # Неизвестный статус: не блокируем, но можно добавить диагностику при необходимости.
+            return True
+
         # --- Формируем spot_swap_pair_data_dict по base/quote ---
         new_dict = {}
-        spot_markets = {k: v for k, v in markets.items() if v.get('spot')}
-        swap_markets = {k: v for k, v in markets.items() if v.get('swap')}
+        spot_markets = {
+            k: v for k, v in markets.items()
+            if v.get('spot') and is_tradable_market(v)
+        }
+        swap_markets = {
+            k: v for k, v in markets.items()
+            if v.get('swap') and is_tradable_market(v)
+        }
 
         for spot_sym, spot_data in spot_markets.items():
             base = spot_data['base']
