@@ -986,9 +986,9 @@ async def main():
             "port": 8765,
             "row_header": False,
             "title": "Open Arbitrage Ratio",
-            "transport": "polling",
-            "max_fps": 5.0,
-            "client_poll_interval_ms": 250,
+            "transport": "sse",
+            "max_fps": 2.0,
+            "client_poll_interval_ms": 500,
         },
         daemon=True,
     )
