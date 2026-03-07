@@ -1,4 +1,6 @@
-_version_ = '1.0'
+from __future__ import annotations
+
+_version_ = '1.1'
 """Скользящая статистика интервалов между обновлениями ордербука.
 
 Модуль изолирует аналитику качества входящего стрима `watchOrderBook`.
@@ -35,8 +37,6 @@ Notes:
     скользящее окно, чтобы статистика отражала текущее состояние потока,
     а не отдельные несвязанные батчи.
 """
-
-from __future__ import annotations
 
 from collections import deque
 from math import sqrt
