@@ -32,6 +32,7 @@ Notes:
 
 import signal
 import multiprocessing
+import os
 
 from modules import (cprint, round_down, get_average_orderbook_price, sync_time_with_exchange)
 from pprint import pprint
@@ -559,6 +560,7 @@ class ArbitrageManager:
     web_grid_shared_values = {"shutdown": multiprocessing.Value('b', False)}
     web_grid_process = None
     web_grid_rows: dict[str, dict[str, Any]] = {}
+    web_grid_event_mode = "snapshot"
 
     _configured = False
 
@@ -570,6 +572,8 @@ class ArbitrageManager:
 
     @classmethod
     def _push_web_grid_snapshot(cls) -> None:
+        if cls.web_grid_event_mode != "snapshot":
+            return
         sorted_rows = sorted(
             cls.web_grid_rows.values(),
             key=lambda row: (-row["open_ratio_value"], row["symbol"])
@@ -611,7 +615,7 @@ class ArbitrageManager:
         bid_mean_dt: float | None,
         open_ratio: Decimal,
     ) -> None:
-        cls.web_grid_rows[symbol] = {
+        row_data = {
             "symbol": symbol,
             "ask_exchange": ask_exchange,
             "ask_mean_dt": cls._format_mean_dt(ask_mean_dt),
@@ -620,12 +624,31 @@ class ArbitrageManager:
             "open_ratio": f"{open_ratio}%",
             "open_ratio_value": float(open_ratio),
         }
+        cls.web_grid_rows[symbol] = row_data
+
+        if cls.web_grid_event_mode == "event":
+            cls.web_grid_table_queue.put({
+                "grid_event": "upsert_row",
+                "symbol": symbol,
+                "row": row_data,
+            })
+            return
+
         cls._push_web_grid_snapshot()
 
     @classmethod
     def _remove_web_grid_row(cls, symbol: str) -> None:
-        if cls.web_grid_rows.pop(symbol, None) is not None:
-            cls._push_web_grid_snapshot()
+        if cls.web_grid_rows.pop(symbol, None) is None:
+            return
+
+        if cls.web_grid_event_mode == "event":
+            cls.web_grid_table_queue.put({
+                "grid_event": "remove_row",
+                "symbol": symbol,
+            })
+            return
+
+        cls._push_web_grid_snapshot()
 
     @classmethod
     def get_configure(cls, *, exchanges_instances_dict=None, balance_manager=None,
@@ -952,162 +975,213 @@ class ArbitrageManager:
             else:
                 type(self)._remove_web_grid_row(self.symbol)
 
-async def main():
-    """
-    Локальная точка запуска модуля.
+def calculate_worker_process_count(cpu_count: int | None = None) -> int:
+    cpu_total = cpu_count or os.cpu_count() or 1
+    if cpu_total <= 1:
+        return 1
+    if cpu_total <= 3:
+        return 2
+    return cpu_total - 2
 
-    Что делает:
-    1. Поднимает подключения к биржам.
-    2. Запускает задачи мониторинга баланса.
-    3. Формирует словари инструментов (`swap_raw_data_dict` / `swap_processed_data_dict`).
-    4. Настраивает `ArbitrageManager` и `ExchangeInstrument`.
-    5. Запускает задачи арбитража по символам.
-    6. Ждёт системный сигнал завершения (SIGINT/SIGTERM).
-    """
-    TASK_MANAGER = TaskManager()
-    MAX_DEAL_SLOTS = to_decimal('2')
-    EXCHANGE_ID_LIST = ["okx", "htx", "gateio"]
 
-    BalanceManager.task_manager = TASK_MANAGER
-    BalanceManager.max_deal_slots = MAX_DEAL_SLOTS
-    ArbitrageManager.web_grid_shared_values["shutdown"].value = False
+def _reset_runtime_state(*, web_grid_queue=None, shared_values=None, web_grid_event_mode: str = "snapshot") -> None:
+    BalanceManager.task_manager = None
+    BalanceManager.exchange_balance_instance_dict = {}
+    BalanceManager._lock = None
+    BalanceManager.min_balance = None
+    BalanceManager.exchange_min_balance = None
+    BalanceManager.max_deal_volume = None
+    BalanceManager.max_deal_slots = None
+    BalanceManager._volume_ready_event = None
 
-    exchange_instance_dict = {}  # Словарь с экземплярами бирж {symbol:{exchange_obj}}
-    swap_raw_data_dict = {}  # Словарь с сырыми данными {symbol:{exchange_id: <data>}})
-    swap_processed_data_dict = {}  # Словарь с данными для открытия сделок
+    ExchangeInstrument.exchanges_instances_dict = {}
+    ExchangeInstrument.balance_manager = None
+    ExchangeInstrument.task_manager = None
+    ExchangeInstrument.exchange_instruments_obj_dict = {}
+    ExchangeInstrument.swap_processed_data_dict = None
+    ExchangeInstrument.swap_raw_data_dict = None
+    ExchangeInstrument.orderbook_updating_status_dict = {}
+    ExchangeInstrument.get_ex_orderbook_data_count = {}
+    ExchangeInstrument._configured = False
+    ExchangeInstrument._lock = None
 
-    ArbitrageManager.web_grid_process = multiprocessing.Process(
-        target=run_web_grid_process,
-        kwargs={
-            "table_queue_data": ArbitrageManager.web_grid_table_queue,
-            "shared_values": ArbitrageManager.web_grid_shared_values,
-            "queue_datadict_wrapper_key": None,
-            "host": "127.0.0.1",
-            "port": 8765,
-            "row_header": False,
-            "title": "Open Arbitrage Ratio",
-            "transport": "sse",
-            "max_fps": 2.0,
-            "client_poll_interval_ms": 500,
-        },
-        daemon=True,
+    ArbitrageManager.exchanges_instances_dict = {}
+    ArbitrageManager.arbitrage_obj_dict = {}
+    ArbitrageManager.symbol_arbitrage_enable_flag_dict = {}
+    ArbitrageManager.task_manager = None
+    ArbitrageManager.balance_manager = None
+    ArbitrageManager.max_deal_slots = None
+    ArbitrageManager.free_deals_slots = None
+    ArbitrageManager.swap_processed_data_dict = {}
+    ArbitrageManager.swap_raw_data_dict = {}
+    ArbitrageManager.web_grid_table_queue = web_grid_queue
+    ArbitrageManager.web_grid_shared_values = shared_values or {"shutdown": multiprocessing.Value('b', False)}
+    ArbitrageManager.web_grid_process = None
+    ArbitrageManager.web_grid_rows = {}
+    ArbitrageManager.web_grid_event_mode = web_grid_event_mode
+    ArbitrageManager._configured = False
+    ArbitrageManager._lock = asyncio.Lock()
+
+
+async def _open_exchange_instances(stack: AsyncExitStack, exchange_id_list: list[str]) -> dict[str, ExchangeInstance]:
+    async def open_exchange(exchange_id: str):
+        exchange = await stack.enter_async_context(ExchangeInstance(ccxt, exchange_id, log=True))
+        return exchange_id, exchange
+
+    results = await asyncio.gather(*(open_exchange(exchange_id) for exchange_id in exchange_id_list))
+    return dict(results)
+
+
+async def _build_swap_data(
+    exchange_instance_dict: dict[str, ExchangeInstance],
+    task_manager: TaskManager,
+) -> tuple[dict[str, dict[str, dict[str, Any]]], dict[str, dict[str, dict[str, Any]]]]:
+    swap_raw_data_dict: dict[str, dict[str, dict[str, Any]]] = {}
+    swap_processed_data_dict: dict[str, dict[str, dict[str, Any]]] = {}
+    started_balance_managers: list[BalanceManager] = []
+
+    for exchange_id, exchange in exchange_instance_dict.items():
+        balance_manager_obj = BalanceManager(exchange)
+        task_name = f"_BalanceTask|{exchange.id}"
+        task_manager.add_task(name=task_name, coro_func=balance_manager_obj._watch_balance)
+        started_balance_managers.append(balance_manager_obj)
+
+        for pair_data in exchange.spot_swap_pair_data_dict.values():
+            swap_data = pair_data.get("swap")
+            if not swap_data or swap_data.get("settle") != "USDT":
+                continue
+            if swap_data.get('linear') and not swap_data.get('inverse'):
+                symbol = swap_data["symbol"]
+                swap_raw_data_dict.setdefault(symbol, {})[exchange_id] = swap_data
+
+    await asyncio.gather(*(bm.wait_initialized() for bm in started_balance_managers))
+
+    for symbol, exchange_data in list(swap_raw_data_dict.items()):
+        if len(exchange_data) < 2:
+            swap_raw_data_dict.pop(symbol)
+            continue
+
+        max_contract_size = max(data.get('contractSize', 0) for data in exchange_data.values())
+        for exchange_id, data in exchange_data.items():
+            swap_processed_data_dict.setdefault(symbol, {}).setdefault(exchange_id, {})
+            swap_processed_data_dict[symbol][exchange_id]['contractSize'] = data.get('contractSize')
+            swap_processed_data_dict[symbol][exchange_id]['max_contractSize'] = max_contract_size
+
+    return swap_raw_data_dict, swap_processed_data_dict
+
+
+def split_symbols_between_processes(
+    swap_raw_data_dict: dict[str, dict[str, dict[str, Any]]],
+    swap_processed_data_dict: dict[str, dict[str, dict[str, Any]]],
+    process_count: int,
+    process_index: int,
+) -> tuple[dict[str, dict[str, dict[str, Any]]], dict[str, dict[str, dict[str, Any]]]]:
+    if process_count <= 0:
+        raise ValueError("process_count must be positive")
+    if process_index < 0 or process_index >= process_count:
+        raise ValueError("process_index out of range")
+
+    selected_symbols = [
+        symbol
+        for index, symbol in enumerate(sorted(swap_processed_data_dict))
+        if index % process_count == process_index
+    ]
+
+    worker_raw = {symbol: swap_raw_data_dict[symbol] for symbol in selected_symbols if symbol in swap_raw_data_dict}
+    worker_processed = {
+        symbol: swap_processed_data_dict[symbol]
+        for symbol in selected_symbols
+        if symbol in swap_processed_data_dict
+    }
+    return worker_raw, worker_processed
+
+
+async def _wait_for_shared_shutdown(shared_values: dict[str, Any], poll_interval_sec: float = 0.5) -> None:
+    while True:
+        shutdown_value = shared_values.get("shutdown")
+        if shutdown_value is not None and shutdown_value.value:
+            return
+        await asyncio.sleep(poll_interval_sec)
+
+
+async def run_arbitrage_worker(
+    *,
+    process_index: int,
+    process_count: int,
+    exchange_id_list: list[str],
+    max_deal_slots: Decimal,
+    web_grid_queue,
+    shared_values: dict[str, Any],
+) -> None:
+    task_manager = TaskManager()
+    _reset_runtime_state(
+        web_grid_queue=web_grid_queue,
+        shared_values=shared_values,
+        web_grid_event_mode="event",
     )
-    ArbitrageManager.web_grid_process.start()
-    ArbitrageManager.web_grid_table_queue.put({"title": "Open Arbitrage Ratio"})
-    ArbitrageManager._push_web_grid_snapshot()
+    BalanceManager.task_manager = task_manager
+    BalanceManager.max_deal_slots = max_deal_slots
 
-    # Основной контекст запуск экземпляров из списка бирж
     try:
         async with AsyncExitStack() as stack:
-            async def open_exchange(exchange_id):
-                exchange = await stack.enter_async_context(ExchangeInstance(ccxt, exchange_id, log=True))
-                return exchange_id, exchange
+            exchange_instance_dict = await _open_exchange_instances(stack, exchange_id_list)
+            swap_raw_data_dict, swap_processed_data_dict = await _build_swap_data(exchange_instance_dict, task_manager)
+            worker_raw_data_dict, worker_processed_data_dict = split_symbols_between_processes(
+                swap_raw_data_dict=swap_raw_data_dict,
+                swap_processed_data_dict=swap_processed_data_dict,
+                process_count=process_count,
+                process_index=process_index,
+            )
 
-            # Открываем все биржи параллельно для ускорения старта.
-            results = await asyncio.gather(*(open_exchange(exchange_id) for exchange_id in EXCHANGE_ID_LIST))
-            exchange_instance_dict = dict(results)
-
-            started_balance_managers = []
-
-            # После открытия всех бирж запускаем balance-задачи для всех бирж
-            for exchange_id, exchange in exchange_instance_dict.items():
-                balance_manager_obj = BalanceManager(exchange)
-                task_name = f"_BalanceTask|{exchange.id}"
-                TASK_MANAGER.add_task(name=task_name, coro_func=balance_manager_obj._watch_balance)
-                started_balance_managers.append(balance_manager_obj)
-
-            # Сборка сырого словаря по символам:
-            # {symbol: {exchange_id: swap_market_data}}
-                for pair_data in exchange.spot_swap_pair_data_dict.values():
-                    if swap_data := pair_data.get("swap"):
-                        if not swap_data or swap_data.get("settle") != "USDT":
-                            continue
-                        symbol = swap_data["symbol"]
-                        if swap_data.get('linear') and not swap_data.get('inverse'):
-                            swap_raw_data_dict.setdefault(symbol, {})[exchange_id] = swap_data
-
-            # Ожидание инициализации всех балансов после запуска всех watch-задач.
-            # Так первичные fetch_balance идут одновременно, а не по очереди.
-            await asyncio.gather(*(bm.wait_initialized() for bm in started_balance_managers))
-
-            # Парсинг/нормализация данных для swap_processed_data_dict:
-            # здесь оставляем только символы, присутствующие минимум на 2 биржах.
-            for symbol, volume in swap_raw_data_dict.items():
-                # Если символ только на одной бирже, он не попадает в переработанный словарь
-                if len(volume) < 2:
-                    continue
-                max_contractSize = 0  # Максимальный размер единичного контракта среди бирж символа
-                # Объём сделки должен учитывать максимально "крупный" контракт среди бирж символа.
-                # Идея: дальнейшие вычисления можно унифицировать через max_contractSize.
-                for exchange_id, data in volume.items():
-                    contractSize = data.get('contractSize')
-                    if max_contractSize < contractSize:
-                        max_contractSize = contractSize
-                    swap_processed_data_dict.setdefault(symbol, {}).setdefault(exchange_id, {})['contractSize'] = contractSize
-                for exchange_id, data in volume.items():
-                    swap_processed_data_dict[symbol][exchange_id]['max_contractSize'] = max_contractSize
-
-            print("*****************************")
-            pprint(swap_processed_data_dict)
-            print("*****************************")
-
-
-            for symbol in list(swap_raw_data_dict):
-                if len(swap_raw_data_dict[symbol]) < 2:
-                    swap_raw_data_dict.pop(symbol)
-            c1 = 0
-            c2 = 0
-            c3 = 0
-            for symbol in list(swap_raw_data_dict):
-                if 'gateio' in swap_raw_data_dict[symbol]:
-                    c1 += 1
-                if 'htx' in swap_raw_data_dict[symbol]:
-                    c2 += 1
-                if 'okx' in swap_raw_data_dict[symbol]:
-                    c3 += 1
-
-        # pprint(swap_raw_data_dict)
-
-        # Инициализация аргументов класса ArbitrageManager и ExchangeInstrument
-            if swap_processed_data_dict and swap_raw_data_dict:
+            if worker_processed_data_dict and worker_raw_data_dict:
                 ArbitrageManager.get_configure(
                     exchanges_instances_dict=exchange_instance_dict,
                     balance_manager=BalanceManager,
-                    task_manager=TASK_MANAGER,
-                    max_deal_slots=MAX_DEAL_SLOTS,
-                    swap_raw_data_dict=swap_raw_data_dict,
-                    swap_processed_data_dict=swap_processed_data_dict
-
+                    task_manager=task_manager,
+                    max_deal_slots=max_deal_slots,
+                    swap_raw_data_dict=worker_raw_data_dict,
+                    swap_processed_data_dict=worker_processed_data_dict,
                 )
-
                 ExchangeInstrument.get_configure(
                     exchanges_instances_dict=exchange_instance_dict,
                     balance_manager=BalanceManager,
-                    task_manager=TASK_MANAGER,
-                    swap_raw_data_dict=swap_raw_data_dict,
-                    swap_processed_data_dict=swap_processed_data_dict
+                    task_manager=task_manager,
+                    swap_raw_data_dict=worker_raw_data_dict,
+                    swap_processed_data_dict=worker_processed_data_dict,
                 )
+                await ArbitrageManager.create_all_arbitrage_objects()
 
-                await ArbitrageManager.create_all_arbitrage_objects()  # Основная точка входа в класс ArbitrageManager
-            print(len(swap_raw_data_dict))
-            print(c1, c2, c3)
-
-            # ---- graceful shutdown ----
-            # Процесс остаётся жить, пока не придёт системный сигнал на завершение.
-            stop_event = asyncio.Event()
-            loop = asyncio.get_running_loop()
-            try:
-                loop.add_signal_handler(signal.SIGINT, stop_event.set)
-                loop.add_signal_handler(signal.SIGTERM, stop_event.set)
-            except NotImplementedError:
-                pass
-
-            await stop_event.wait()
+            print(
+                f"[worker:{process_index}] symbols={len(worker_processed_data_dict)} "
+                f"process_count={process_count}"
+            )
+            await _wait_for_shared_shutdown(shared_values)
     finally:
-        ArbitrageManager.web_grid_shared_values["shutdown"].value = True
-        if ArbitrageManager.web_grid_process is not None:
-            ArbitrageManager.web_grid_process.join(timeout=3)
+        for balance_manager in BalanceManager.exchange_balance_instance_dict.values():
+            balance_manager.enable = False
+
+        for symbol in list(ArbitrageManager.web_grid_rows):
+            ArbitrageManager._remove_web_grid_row(symbol)
+
+        await task_manager.cancel_all()
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+def run_arbitrage_worker_process(
+    *,
+    process_index: int,
+    process_count: int,
+    exchange_id_list: list[str],
+    max_deal_slots: Decimal,
+    web_grid_queue,
+    shared_values: dict[str, Any],
+) -> None:
+    asyncio.run(
+        run_arbitrage_worker(
+            process_index=process_index,
+            process_count=process_count,
+            exchange_id_list=exchange_id_list,
+            max_deal_slots=max_deal_slots,
+            web_grid_queue=web_grid_queue,
+            shared_values=shared_values,
+        )
+    )
