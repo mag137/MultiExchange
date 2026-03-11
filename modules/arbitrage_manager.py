@@ -1,4 +1,4 @@
-__version__ = "0.7i"
+__version__ = "0.8i"
 
 """Координация арбитражного потока по символу между несколькими биржами.
 
@@ -823,9 +823,9 @@ class ArbitrageManager:
 
         type(self).symbol_arbitrage_enable_flag_dict[self.symbol] = True
 
-        print("------------------------------")
-        pprint(self.__class__.swap_processed_data_dict)
-        print("------------------------------")
+        # print("------------------------------")
+        # pprint(self.__class__.swap_processed_data_dict)
+        # print("------------------------------")
 
         # Запуск задач ордербуков.
         # active_exchange_ids отражает "кто ещё участвует" в текущем символе.
@@ -1025,11 +1025,29 @@ def _reset_runtime_state(*, web_grid_queue=None, shared_values=None, web_grid_ev
 
 async def _open_exchange_instances(stack: AsyncExitStack, exchange_id_list: list[str]) -> dict[str, ExchangeInstance]:
     async def open_exchange(exchange_id: str):
-        exchange = await stack.enter_async_context(ExchangeInstance(ccxt, exchange_id, log=True))
-        return exchange_id, exchange
+        try:
+            exchange = await stack.enter_async_context(ExchangeInstance(ccxt, exchange_id, log=True))
+            return exchange_id, exchange, None
+        except Exception as exc:
+            return exchange_id, None, exc
 
     results = await asyncio.gather(*(open_exchange(exchange_id) for exchange_id in exchange_id_list))
-    return dict(results)
+    exchange_instance_dict: dict[str, ExchangeInstance] = {}
+    failed: list[tuple[str, Exception]] = []
+    for exchange_id, exchange, error in results:
+        if exchange is None:
+            if isinstance(error, Exception):
+                failed.append((exchange_id, error))
+            else:
+                failed.append((exchange_id, Exception("unknown error")))
+            continue
+        exchange_instance_dict[exchange_id] = exchange
+
+    if failed:
+        for exchange_id, error in failed:
+            cprint.warning_r(f"[worker] exchange init failed: {exchange_id}: {error}")
+
+    return exchange_instance_dict
 
 
 async def _build_swap_data(
@@ -1125,6 +1143,13 @@ async def run_arbitrage_worker(
     try:
         async with AsyncExitStack() as stack:
             exchange_instance_dict = await _open_exchange_instances(stack, exchange_id_list)
+            if len(exchange_instance_dict) < 2:
+                cprint.warning_r(
+                    f"[worker:{process_index}] not enough exchanges to run arbitrage: "
+                    f"{list(exchange_instance_dict.keys())}"
+                )
+                await _wait_for_shared_shutdown(shared_values)
+                return
             swap_raw_data_dict, swap_processed_data_dict = await _build_swap_data(exchange_instance_dict, task_manager)
             worker_raw_data_dict, worker_processed_data_dict = split_symbols_between_processes(
                 swap_raw_data_dict=swap_raw_data_dict,

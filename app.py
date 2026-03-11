@@ -5,6 +5,8 @@ import threading
 import time
 from decimal import Decimal
 from typing import Any
+import asyncio
+import sys
 
 from modules.WebGrid_Socket_Polling import run_web_grid_process
 from modules.arbitrage_manager import (
@@ -169,6 +171,8 @@ def _stop_processes(processes: list[multiprocessing.Process], timeout_sec: float
 
 def main() -> None:
     multiprocessing.freeze_support()
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
     shared_values = {"shutdown": multiprocessing.Value('b', False)}
     web_grid_queue: multiprocessing.Queue = multiprocessing.Queue()

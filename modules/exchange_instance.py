@@ -1,5 +1,5 @@
 __version__ = '6.1i'
-# Добавлены фильтры доступности монеты для торговли
+# Р”РѕР±Р°РІР»РµРЅС‹ С„РёР»СЊС‚СЂС‹ РґРѕСЃС‚СѓРїРЅРѕСЃС‚Рё РјРѕРЅРµС‚С‹ РґР»СЏ С‚РѕСЂРіРѕРІР»Рё
 import ssl
 import certifi
 import aiohttp
@@ -21,7 +21,7 @@ from pprint import pprint
 
 
 # ===============================================================
-# ЛОГГЕР
+# Р›РћР“Р“Р•Р 
 # ===============================================================
 logger = LoggerFactory.get_logger(
     name="exchange_instance",
@@ -39,7 +39,7 @@ logger = LoggerFactory.get_logger(
 
 
 # ===============================================================
-# ОСНОВНОЙ КЛАСС EXCHANGEINSTANCE
+# РћРЎРќРћР’РќРћР™ РљР›РђРЎРЎ EXCHANGEINSTANCE
 # ===============================================================
 class ExchangeInstance:
     def __init__(
@@ -67,28 +67,28 @@ class ExchangeInstance:
         self.session: Optional[aiohttp.ClientSession] = None
         self.exchange: Optional[ccxt.Exchange] = None
 
-        # Данные
+        # Р”Р°РЅРЅС‹Рµ
         self.api_keys: Dict[str, str] = {}
         self.dict_api: Dict[str, Dict[str, str]] = {}
         self.markets: Optional[Dict[str, Any]] = None
         self.MarketsSortData_instance: Optional[MarketsSortData] = None
         self.spot_swap_pair_data_dict: Dict[str, Any] = {}
 
-        # Для контроля изменений
+        # Р”Р»СЏ РєРѕРЅС‚СЂРѕР»СЏ РёР·РјРµРЅРµРЅРёР№
         self._last_markets_hash: Optional[str] = None
         self._last_pairs_hash: Optional[str] = None
 
-        # Пути
+        # РџСѓС‚Рё
         current_file_path = Path(__file__).resolve()
         self.project_root = current_file_path.parents[1]
         self.source_path = self.project_root / 'source'
 
-        # Загрузка ключей
+        # Р—Р°РіСЂСѓР·РєР° РєР»СЋС‡РµР№
         self._load_api_keys()
 
 
     # ===============================================================
-    # CCXT ПРОКСИ МЕТОДЫ
+    # CCXT РџР РћРљРЎР РњР•РўРћР”Р«
     # ===============================================================
     async def fetch_balance(self, params=None):
         return await self.exchange.fetch_balance(params or {})
@@ -107,7 +107,7 @@ class ExchangeInstance:
 
 
     # ===============================================================
-    # ЗАГРУЗКА КЛЮЧЕЙ
+    # Р—РђР“Р РЈР—РљРђ РљР›Р®Р§Р•Р™
     # ===============================================================
     def _load_api_keys(self) -> None:
         api_file = self.source_path / ('api_keys_sand.json' if self.sandbox else 'api_keys.json')
@@ -118,13 +118,13 @@ class ExchangeInstance:
                 self.api_keys = self.dict_api.get(self.exchange_id, {})
 
             if self.log:
-                logger.debug(f"[{self.exchange_id}] API ключи загружены из {api_file}")
+                logger.debug(f"[{self.exchange_id}] API РєР»СЋС‡Рё Р·Р°РіСЂСѓР¶РµРЅС‹ РёР· {api_file}")
 
         except FileNotFoundError:
-            logger.warning(f"[{self.exchange_id}] Файл API ключей не найден: {api_file}")
+            logger.warning(f"[{self.exchange_id}] Р¤Р°Р№Р» API РєР»СЋС‡РµР№ РЅРµ РЅР°Р№РґРµРЅ: {api_file}")
 
         except json.JSONDecodeError:
-            logger.error(f"[{self.exchange_id}] Ошибка JSON в {api_file}")
+            logger.error(f"[{self.exchange_id}] РћС€РёР±РєР° JSON РІ {api_file}")
 
 
     # ===============================================================
@@ -138,7 +138,7 @@ class ExchangeInstance:
 
 
     # ===============================================================
-    # ENTER / EXIT — КОНТЕКСТНЫЙ МЕНЕДЖЕР
+    # ENTER / EXIT вЂ” РљРћРќРўР•РљРЎРўРќР«Р™ РњР•РќР•Р”Р–Р•Р 
     # ===============================================================
     async def __aenter__(self):
         try:
@@ -159,8 +159,8 @@ class ExchangeInstance:
             if self.exchange_id == 'gateio':
                 uid = self.api_keys.get('uid')
                 if not uid:
-                    logger.error("[gateio] отсутствует uid в api_keys.json")
-                    raise ValueError("gateio требует ключ uid")
+                    logger.error("[gateio] РѕС‚СЃСѓС‚СЃС‚РІСѓРµС‚ uid РІ api_keys.json")
+                    raise ValueError("gateio С‚СЂРµР±СѓРµС‚ РєР»СЋС‡ uid")
                 self.params['uid'] = uid
 
             exchange_class = getattr(self.ccxt_module, self.exchange_id)
@@ -169,10 +169,15 @@ class ExchangeInstance:
             if self.exchange_id == 'gateio':
                 self.exchange.options['createMarketBuyOrderRequiresPrice'] = False
 
-            # Загружаем рынки и обновляем атрибут spot_swap_pair_data_dict
+            # Синхронизация времени с сервером биржи (важно для подписи запросов)
+            try:
+                await sync_time_with_exchange(self.exchange, auto_adjust=True)
+            except Exception as e:
+                logger.warning(f"[{self.exchange_id}] не удалось синхронизировать время: {e}")
+            # Р—Р°РіСЂСѓР¶Р°РµРј СЂС‹РЅРєРё Рё РѕР±РЅРѕРІР»СЏРµРј Р°С‚СЂРёР±СѓС‚ spot_swap_pair_data_dict
             await self.load_markets_data()
 
-            # Гарантируем, что атрибут есть на объекте биржи, даже если словарь пустой
+            # Р“Р°СЂР°РЅС‚РёСЂСѓРµРј, С‡С‚Рѕ Р°С‚СЂРёР±СѓС‚ РµСЃС‚СЊ РЅР° РѕР±СЉРµРєС‚Рµ Р±РёСЂР¶Рё, РґР°Р¶Рµ РµСЃР»Рё СЃР»РѕРІР°СЂСЊ РїСѓСЃС‚РѕР№
             if not hasattr(self.exchange, 'spot_swap_pair_data_dict'):
                 self.exchange.spot_swap_pair_data_dict = self.spot_swap_pair_data_dict or {}
 
@@ -181,7 +186,7 @@ class ExchangeInstance:
 
             return self.exchange
         except Exception:
-            # гарантированная очистка
+            # РіР°СЂР°РЅС‚РёСЂРѕРІР°РЅРЅР°СЏ РѕС‡РёСЃС‚РєР°
             if self.exchange:
                 await self.exchange.close()
             if self.session:
@@ -194,7 +199,7 @@ class ExchangeInstance:
             try:
                 await self._market_updater_task
             except asyncio.CancelledError:
-                logger.debug(f"[{self.exchange_id}] фоновый апдейтер остановлен")
+                logger.debug(f"[{self.exchange_id}] С„РѕРЅРѕРІС‹Р№ Р°РїРґРµР№С‚РµСЂ РѕСЃС‚Р°РЅРѕРІР»РµРЅ")
 
         if self.exchange:
             await self.exchange.close()
@@ -204,7 +209,7 @@ class ExchangeInstance:
 
 
     # ===============================================================
-    # ХЕШИРОВАНИЕ ОБЪЕКТОВ
+    # РҐР•РЁРР РћР’РђРќРР• РћР‘РЄР•РљРўРћР’
     # ===============================================================
     def _hash_obj(self, obj: Any) -> str:
         try:
@@ -215,32 +220,32 @@ class ExchangeInstance:
 
 
     # ===============================================================
-    # ЗАГРУЗКА И ОБНОВЛЕНИЕ MARKETS С РАСШИРЕННЫМ ЛОГОМ
+    # Р—РђР“Р РЈР—РљРђ Р РћР‘РќРћР’Р›Р•РќРР• MARKETS РЎ Р РђРЎРЁРР Р•РќРќР«Рњ Р›РћР“РћРњ
     # ===============================================================
     # ===============================================================
-    # ЗАГРУЗКА И ОБНОВЛЕНИЕ MARKETS С РАСШИРЕННЫМ ЛОГОМ
+    # Р—РђР“Р РЈР—РљРђ Р РћР‘РќРћР’Р›Р•РќРР• MARKETS РЎ Р РђРЎРЁРР Р•РќРќР«Рњ Р›РћР“РћРњ
     # ===============================================================
     async def load_markets_data(self, force_reload: bool = False) -> dict:
         if not self.exchange:
-            raise RuntimeError("Биржа не инициализирована")
+            raise RuntimeError("Р‘РёСЂР¶Р° РЅРµ РёРЅРёС†РёР°Р»РёР·РёСЂРѕРІР°РЅР°")
 
         self.exchange.markets_updating = True
         start_time = asyncio.get_event_loop().time()
 
-        # Загружаем рынки
+        # Р—Р°РіСЂСѓР¶Р°РµРј СЂС‹РЅРєРё
         markets = await self.exchange.load_markets(reload=force_reload)
         while not markets:
             await asyncio.sleep(0.2)
         latency_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
 
-        # --- Создаём экземпляр MarketsSortData ---
+        # --- РЎРѕР·РґР°С‘Рј СЌРєР·РµРјРїР»СЏСЂ MarketsSortData ---
         new_sort_instance = MarketsSortData(markets, log=False)
 
         def is_tradable_market(market: dict) -> bool:
             """
-            Унифицированная проверка доступности рынка.
-            Нужна, чтобы исключить из словаря пары инструменты, которые уже не торгуются
-            (например, halted/suspend/offline), но ещё присутствуют в ответе load_markets().
+            РЈРЅРёС„РёС†РёСЂРѕРІР°РЅРЅР°СЏ РїСЂРѕРІРµСЂРєР° РґРѕСЃС‚СѓРїРЅРѕСЃС‚Рё СЂС‹РЅРєР°.
+            РќСѓР¶РЅР°, С‡С‚РѕР±С‹ РёСЃРєР»СЋС‡РёС‚СЊ РёР· СЃР»РѕРІР°СЂСЏ РїР°СЂС‹ РёРЅСЃС‚СЂСѓРјРµРЅС‚С‹, РєРѕС‚РѕСЂС‹Рµ СѓР¶Рµ РЅРµ С‚РѕСЂРіСѓСЋС‚СЃСЏ
+            (РЅР°РїСЂРёРјРµСЂ, halted/suspend/offline), РЅРѕ РµС‰С‘ РїСЂРёСЃСѓС‚СЃС‚РІСѓСЋС‚ РІ РѕС‚РІРµС‚Рµ load_markets().
             """
             if not isinstance(market, dict):
                 return False
@@ -249,7 +254,7 @@ class ExchangeInstance:
                 return False
 
             info = market.get("info") or {}
-            # Разные биржи используют разные ключи состояния.
+            # Р Р°Р·РЅС‹Рµ Р±РёСЂР¶Рё РёСЃРїРѕР»СЊР·СѓСЋС‚ СЂР°Р·РЅС‹Рµ РєР»СЋС‡Рё СЃРѕСЃС‚РѕСЏРЅРёСЏ.
             raw_states = [
                 info.get("state"),
                 info.get("status"),
@@ -262,11 +267,11 @@ class ExchangeInstance:
                 if s is not None and str(s).strip() != ""
             ]
 
-            # Если статусы не пришли вообще — считаем инструмент потенциально пригодным.
+            # Р•СЃР»Рё СЃС‚Р°С‚СѓСЃС‹ РЅРµ РїСЂРёС€Р»Рё РІРѕРѕР±С‰Рµ вЂ” СЃС‡РёС‚Р°РµРј РёРЅСЃС‚СЂСѓРјРµРЅС‚ РїРѕС‚РµРЅС†РёР°Р»СЊРЅРѕ РїСЂРёРіРѕРґРЅС‹Рј.
             if not states:
                 return True
 
-            # Разрешённые "торгуется" состояния.
+            # Р Р°Р·СЂРµС€С‘РЅРЅС‹Рµ "С‚РѕСЂРіСѓРµС‚СЃСЏ" СЃРѕСЃС‚РѕСЏРЅРёСЏ.
             allowed_states = {
                 "live",
                 "trading",
@@ -276,7 +281,7 @@ class ExchangeInstance:
                 "normal",
             }
 
-            # Явно неторгуемые состояния.
+            # РЇРІРЅРѕ РЅРµС‚РѕСЂРіСѓРµРјС‹Рµ СЃРѕСЃС‚РѕСЏРЅРёСЏ.
             blocked_states = {
                 "suspend",
                 "suspended",
@@ -296,14 +301,14 @@ class ExchangeInstance:
             if any(s in blocked_states for s in states):
                 return False
 
-            # Если есть явный позитивный статус — инструмент торгуется.
+            # Р•СЃР»Рё РµСЃС‚СЊ СЏРІРЅС‹Р№ РїРѕР·РёС‚РёРІРЅС‹Р№ СЃС‚Р°С‚СѓСЃ вЂ” РёРЅСЃС‚СЂСѓРјРµРЅС‚ С‚РѕСЂРіСѓРµС‚СЃСЏ.
             if any(s in allowed_states for s in states):
                 return True
 
-            # Неизвестный статус: не блокируем, но можно добавить диагностику при необходимости.
+            # РќРµРёР·РІРµСЃС‚РЅС‹Р№ СЃС‚Р°С‚СѓСЃ: РЅРµ Р±Р»РѕРєРёСЂСѓРµРј, РЅРѕ РјРѕР¶РЅРѕ РґРѕР±Р°РІРёС‚СЊ РґРёР°РіРЅРѕСЃС‚РёРєСѓ РїСЂРё РЅРµРѕР±С…РѕРґРёРјРѕСЃС‚Рё.
             return True
 
-        # --- Формируем spot_swap_pair_data_dict по base/quote ---
+        # --- Р¤РѕСЂРјРёСЂСѓРµРј spot_swap_pair_data_dict РїРѕ base/quote ---
         new_dict = {}
         spot_markets = {
             k: v for k, v in markets.items()
@@ -318,7 +323,7 @@ class ExchangeInstance:
             base = spot_data['base']
             quote = spot_data['quote']
 
-            # ищем swap с тем же base/quote
+            # РёС‰РµРј swap СЃ С‚РµРј Р¶Рµ base/quote
             matched_swap = None
             for swap_sym, swap_data in swap_markets.items():
                 if swap_data['base'] == base and swap_data['quote'] == quote:
@@ -332,7 +337,7 @@ class ExchangeInstance:
                     'swap': matched_swap
                 }
 
-                # нормализуем комиссии
+                # РЅРѕСЂРјР°Р»РёР·СѓРµРј РєРѕРјРёСЃСЃРёРё
                 for market_type in ('spot', 'swap'):
                     market = new_dict[pair_name][market_type]
                     taker = market.get('taker')
@@ -340,13 +345,13 @@ class ExchangeInstance:
                     market['taker_fee'] = float(taker) if taker is not None else 0.0
                     market['maker_fee'] = float(maker) if maker is not None else 0.0
 
-        # Проверка на изменения
+        # РџСЂРѕРІРµСЂРєР° РЅР° РёР·РјРµРЅРµРЅРёСЏ
         changed = new_dict != self.spot_swap_pair_data_dict
 
         if changed:
             self.markets = markets
 
-            # **Важно:** обновляем экземпляр MarketsSortData, чтобы deal_amounts_calc_func работал
+            # **Р’Р°Р¶РЅРѕ:** РѕР±РЅРѕРІР»СЏРµРј СЌРєР·РµРјРїР»СЏСЂ MarketsSortData, С‡С‚РѕР±С‹ deal_amounts_calc_func СЂР°Р±РѕС‚Р°Р»
             new_sort_instance.spot_swap_pair_data_dict = new_dict
             self.MarketsSortData_instance = new_sort_instance
 
@@ -356,13 +361,13 @@ class ExchangeInstance:
             self.exchange.spot_swap_pair_data_dict = new_dict
 
             logger.info(
-                f"[{self.exchange_id}] Markets обновлены: "
-                f"Всего рынков: {len(markets)}, Spot/Swap пар: {len(new_dict)}, Время: {latency_ms} ms"
+                f"[{self.exchange_id}] Markets РѕР±РЅРѕРІР»РµРЅС‹: "
+                f"Р’СЃРµРіРѕ СЂС‹РЅРєРѕРІ: {len(markets)}, Spot/Swap РїР°СЂ: {len(new_dict)}, Р’СЂРµРјСЏ: {latency_ms} ms"
             )
         else:
             logger.debug(
-                f"[{self.exchange_id}] Markets без изменений: "
-                f"Spot/Swap пар: {len(new_dict)}, Время: {latency_ms} ms"
+                f"[{self.exchange_id}] Markets Р±РµР· РёР·РјРµРЅРµРЅРёР№: "
+                f"Spot/Swap РїР°СЂ: {len(new_dict)}, Р’СЂРµРјСЏ: {latency_ms} ms"
             )
 
         self.exchange.markets_updating = False
@@ -387,7 +392,7 @@ class ExchangeInstance:
 
 
     # ===============================================================
-    # ФОНОВЫЙ ОБНОВИТЕЛЬ MARKETS
+    # Р¤РћРќРћР’Р«Р™ РћР‘РќРћР’РРўР•Р›Р¬ MARKETS
     # ===============================================================
     async def _background_markets_updater(self, interval: int, updating: bool):
         while True:
@@ -396,14 +401,14 @@ class ExchangeInstance:
                     return
                 await self.load_markets_data()
             except Exception as e:
-                logger.error(f"[{self.exchange_id}] ошибка фонового обновления markets: {e}")
+                logger.error(f"[{self.exchange_id}] РѕС€РёР±РєР° С„РѕРЅРѕРІРѕРіРѕ РѕР±РЅРѕРІР»РµРЅРёСЏ markets: {e}")
 
             await asyncio.sleep(interval)
 
 
     def start_background_market_updater(self) -> None:
         if not self.exchange:
-            raise RuntimeError("Биржа не инициализирована")
+            raise RuntimeError("Р‘РёСЂР¶Р° РЅРµ РёРЅРёС†РёР°Р»РёР·РёСЂРѕРІР°РЅР°")
 
         if self._market_updater_task is None or self._market_updater_task.done():
             self._market_updater_task = asyncio.create_task(
@@ -413,32 +418,32 @@ class ExchangeInstance:
                 )
             )
             logger.info(
-                f"[{self.exchange_id}] фоновое обновление markets запущено (interval={self.update_interval})"
+                f"[{self.exchange_id}] С„РѕРЅРѕРІРѕРµ РѕР±РЅРѕРІР»РµРЅРёРµ markets Р·Р°РїСѓС‰РµРЅРѕ (interval={self.update_interval})"
             )
 
 
 async def main():
-    # Создаём экземпляр ExchangeInstance
+    # РЎРѕР·РґР°С‘Рј СЌРєР·РµРјРїР»СЏСЂ ExchangeInstance
     async with ExchangeInstance(ccxt, "bybit", update_interval=120, log=True) as exchange:
-        # Синхронизируем время биржи
+        # РЎРёРЅС…СЂРѕРЅРёР·РёСЂСѓРµРј РІСЂРµРјСЏ Р±РёСЂР¶Рё
         await sync_time_with_exchange(exchange)
 
-        # Ждём, пока spot_swap_pair_data_dict появится на объекте биржи
-        timeout = 10  # секунд
+        # Р–РґС‘Рј, РїРѕРєР° spot_swap_pair_data_dict РїРѕСЏРІРёС‚СЃСЏ РЅР° РѕР±СЉРµРєС‚Рµ Р±РёСЂР¶Рё
+        timeout = 10  # СЃРµРєСѓРЅРґ
         start = asyncio.get_event_loop().time()
         while not getattr(exchange, 'spot_swap_pair_data_dict', None):
             await asyncio.sleep(0.1)
             if asyncio.get_event_loop().time() - start > timeout:
-                logger.warning(f"[{exchange.id}] Спот/своп пары не найдены после {timeout}s")
+                logger.warning(f"[{exchange.id}] РЎРїРѕС‚/СЃРІРѕРї РїР°СЂС‹ РЅРµ РЅР°Р№РґРµРЅС‹ РїРѕСЃР»Рµ {timeout}s")
                 break
 
         spot_swap_pairs = getattr(exchange, 'spot_swap_pair_data_dict', {})
 
         if not spot_swap_pairs:
-            print(f"[{exchange.id}] Нет арбитражных пар для обработки")
+            print(f"[{exchange.id}] РќРµС‚ Р°СЂР±РёС‚СЂР°Р¶РЅС‹С… РїР°СЂ РґР»СЏ РѕР±СЂР°Р±РѕС‚РєРё")
             return
 
-        # Пример расчёта сделки
+        # РџСЂРёРјРµСЂ СЂР°СЃС‡С‘С‚Р° СЃРґРµР»РєРё
         deal_pair = 'BTC/USDT_BTC/USDT:USDT'
         if deal_pair in spot_swap_pairs:
             res2 = exchange.deal_amounts_calc_func(
@@ -450,10 +455,10 @@ async def main():
             )
             pprint(res2)
         else:
-            print(f"[{exchange.id}] Пара {deal_pair} отсутствует в данных")
+            print(f"[{exchange.id}] РџР°СЂР° {deal_pair} РѕС‚СЃСѓС‚СЃС‚РІСѓРµС‚ РІ РґР°РЅРЅС‹С…")
 
-        # Список всех собранных арбитражных пар
-        print("Всего арбитражных пар собрано:", len(spot_swap_pairs))
+        # РЎРїРёСЃРѕРє РІСЃРµС… СЃРѕР±СЂР°РЅРЅС‹С… Р°СЂР±РёС‚СЂР°Р¶РЅС‹С… РїР°СЂ
+        print("Р’СЃРµРіРѕ Р°СЂР±РёС‚СЂР°Р¶РЅС‹С… РїР°СЂ СЃРѕР±СЂР°РЅРѕ:", len(spot_swap_pairs))
         pprint(list(spot_swap_pairs.keys()))
 
 
