@@ -1,4 +1,4 @@
-__version__ = '6.1i'
+__version__ = '6.2i'
 # Р”РѕР±Р°РІР»РµРЅС‹ С„РёР»СЊС‚СЂС‹ РґРѕСЃС‚СѓРїРЅРѕСЃС‚Рё РјРѕРЅРµС‚С‹ РґР»СЏ С‚РѕСЂРіРѕРІР»Рё
 import ssl
 import certifi
@@ -147,6 +147,10 @@ class ExchangeInstance:
             self.session = aiohttp.ClientSession(
                 connector=aiohttp.TCPConnector(ssl=ssl_context)
             )
+
+            # CCXT rate limiter helps prevent 429/50011 bursts during parallel startup.
+            # We keep it opt-out via explicit params override if needed.
+            self.params.setdefault("enableRateLimit", True)
 
             self.params.update({
                 'apiKey': self.api_keys.get('API', ''),
