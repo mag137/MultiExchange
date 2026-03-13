@@ -1,3 +1,4 @@
+_version_ = "0.1i"
 import multiprocessing
 import queue
 import signal
@@ -199,7 +200,7 @@ def main() -> None:
     )
     aggregator_thread.start()
 
-    process_count = calculate_worker_process_count()
+    process_count = min(calculate_worker_process_count(), 8)
     worker_processes = _start_worker_processes(
         process_count=process_count,
         exchange_id_list=EXCHANGE_ID_LIST,
