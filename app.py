@@ -1,4 +1,36 @@
-_version_ = "0.1i"
+_version_ = "0.2i"
+
+"""• Сделано. Добавил контроль фактического старта воркеров и отдельную служебную веб‑страницу статусов.
+
+  Ключевое поведение
+
+  1. Каждый воркер шлёт события worker_started, worker_ready, worker_inactive, worker_heartbeat, worker_error.
+  2. Главный процесс ждёт подтверждения старта всех воркеров (таймаут WORKER_START_TIMEOUT_SEC = 30), пишет предупреждение, если кто-то не подтвердился.
+  3. В статусах фиксируется завершение воркера (state=dead) и exitcode.
+
+  Служебная страница
+
+  - URL: http://127.0.0.1:8765/status
+  - Что показывается:
+      - Uptime, Workers Ready, Shutdown Flag, Last Update
+      - Таблица воркеров: Worker, PID, State, Heartbeat, Exchanges OK/Failed, Symbols
+      - Лента сообщений: старт/готовность/неактивность, ошибки, завершение воркеров
+
+  Где изменено
+
+  - app.py
+      - Добавлены очереди status_queue, control_queue
+      - Запуск мониторинга статусов и ожидание готовности воркеров
+      - Обработка внезапного завершения воркеров
+  - modules/arbitrage_manager.py
+      - Сигналы старта/готовности/heartbeat
+      - Передача количества доступных бирж и символов
+  - modules/WebGrid_Socket_Polling.py
+      - Новый HTML /status
+      - Новые API /api/status/state, /api/status/stream
+      - Обработка очереди статус‑сообщений"""
+
+
 import multiprocessing
 import queue
 import signal
@@ -20,6 +52,192 @@ from modules.utils import to_decimal
 WEB_GRID_TITLE = "Open Arbitrage Ratio"
 EXCHANGE_ID_LIST = ["okx", "htx", "gateio"]
 MAX_DEAL_SLOTS = to_decimal("2")
+WORKER_START_TIMEOUT_SEC = 30.0
+
+
+def _publish_status_message(
+    status_queue: multiprocessing.Queue,
+    *,
+    level: str,
+    text: str,
+    source: str = "app",
+) -> None:
+    try:
+        status_queue.put(
+            {
+                "status_event": "message",
+                "level": level,
+                "text": text,
+                "source": source,
+                "ts": time.time(),
+            }
+        )
+    except Exception:
+        return
+
+
+def _status_monitor_loop(
+    *,
+    control_queue: multiprocessing.Queue,
+    status_queue: multiprocessing.Queue,
+    shared_values: dict[str, Any],
+    stop_event: threading.Event,
+    expected_workers: int,
+    ready_event: threading.Event,
+) -> None:
+    worker_states: dict[int, dict[str, Any]] = {
+        idx: {"state": "starting"} for idx in range(expected_workers)
+    }
+    started_workers: set[int] = set()
+    ready_workers: set[int] = set()
+
+    try:
+        status_queue.put(
+            {
+                "status_event": "app_state",
+                "expected_workers": expected_workers,
+                "started_workers": 0,
+                "ready_workers": 0,
+                "shutdown": False,
+                "started_ts": time.time(),
+                "ts": time.time(),
+            }
+        )
+        for idx in range(expected_workers):
+            status_queue.put(
+                {
+                    "status_event": "worker_update",
+                    "worker_id": idx,
+                    "state": "starting",
+                    "ts": time.time(),
+                }
+            )
+    except Exception:
+        return
+
+    while not stop_event.is_set():
+        if shared_values["shutdown"].value:
+            try:
+                status_queue.put(
+                    {
+                        "status_event": "summary",
+                        "shutdown": True,
+                        "started_workers": len(started_workers),
+                        "ready_workers": len(ready_workers),
+                        "ts": time.time(),
+                    }
+                )
+            except Exception:
+                pass
+            return
+
+        try:
+            event = control_queue.get(timeout=0.5)
+        except queue.Empty:
+            continue
+
+        if not isinstance(event, dict):
+            continue
+
+        event_type = event.get("event")
+        worker_id = event.get("worker_id")
+
+        if event_type == "worker_started" and isinstance(worker_id, int):
+            started_workers.add(worker_id)
+            worker_states.setdefault(worker_id, {})["state"] = "started"
+            status_queue.put(
+                {
+                    "status_event": "worker_update",
+                    "worker_id": worker_id,
+                    "state": "started",
+                    "pid": event.get("pid"),
+                    "ts": time.time(),
+                }
+            )
+            _publish_status_message(
+                status_queue,
+                level="info",
+                text=f"Воркер {worker_id} стартовал (pid={event.get('pid')}).",
+                source="workers",
+            )
+
+        elif event_type == "worker_ready" and isinstance(worker_id, int):
+            ready_workers.add(worker_id)
+            worker_states.setdefault(worker_id, {})["state"] = "ready"
+            status_queue.put(
+                {
+                    "status_event": "worker_update",
+                    "worker_id": worker_id,
+                    "state": "ready",
+                    "pid": event.get("pid"),
+                    "exchanges_ok": event.get("exchanges_ok"),
+                    "exchanges_failed": event.get("exchanges_failed"),
+                    "symbols_assigned": event.get("symbols_assigned"),
+                    "ts": time.time(),
+                }
+            )
+            _publish_status_message(
+                status_queue,
+                level="info",
+                text=f"Воркер {worker_id} готов: symbols={event.get('symbols_assigned')}.",
+                source="workers",
+            )
+
+        elif event_type == "worker_inactive" and isinstance(worker_id, int):
+            worker_states.setdefault(worker_id, {})["state"] = "inactive"
+            status_queue.put(
+                {
+                    "status_event": "worker_update",
+                    "worker_id": worker_id,
+                    "state": "inactive",
+                    "pid": event.get("pid"),
+                    "exchanges_ok": event.get("exchanges_ok"),
+                    "exchanges_failed": event.get("exchanges_failed"),
+                    "symbols_assigned": event.get("symbols_assigned"),
+                    "ts": time.time(),
+                }
+            )
+            _publish_status_message(
+                status_queue,
+                level="warning",
+                text=f"Воркер {worker_id} не активен: {event.get('reason')}.",
+                source="workers",
+            )
+
+        elif event_type == "worker_heartbeat" and isinstance(worker_id, int):
+            status_queue.put(
+                {
+                    "status_event": "worker_heartbeat",
+                    "worker_id": worker_id,
+                    "pid": event.get("pid"),
+                    "ts": event.get("ts") or time.time(),
+                }
+            )
+
+        elif event_type == "worker_error" and isinstance(worker_id, int):
+            _publish_status_message(
+                status_queue,
+                level="error",
+                text=f"Воркер {worker_id}: {event.get('text')}",
+                source="workers",
+            )
+
+        if len(ready_workers) >= expected_workers and not ready_event.is_set():
+            ready_event.set()
+
+        try:
+            status_queue.put(
+                {
+                    "status_event": "summary",
+                    "started_workers": len(started_workers),
+                    "ready_workers": len(ready_workers),
+                    "expected_workers": expected_workers,
+                    "shutdown": False,
+                    "ts": time.time(),
+                }
+            )
+        except Exception:
+            pass
 
 
 def _build_grid_snapshot(rows: dict[str, dict[str, Any]]) -> dict[Any, dict[int, dict[str, Any]]]:
@@ -105,12 +323,14 @@ def _install_signal_handlers(stop_event: threading.Event, shared_values: dict[st
 def _start_web_grid_process(
     *,
     web_grid_queue: multiprocessing.Queue,
+    status_queue: multiprocessing.Queue,
     shared_values: dict[str, Any],
 ) -> multiprocessing.Process:
     process = multiprocessing.Process(
         target=run_web_grid_process,
         kwargs={
             "table_queue_data": web_grid_queue,
+            "status_queue_data": status_queue,
             "shared_values": shared_values,
             "queue_datadict_wrapper_key": None,
             "host": "127.0.0.1",
@@ -134,6 +354,7 @@ def _start_worker_processes(
     exchange_id_list: list[str],
     max_deal_slots: Decimal,
     worker_grid_queue: multiprocessing.Queue,
+    control_queue: multiprocessing.Queue,
     shared_values: dict[str, Any],
 ) -> list[multiprocessing.Process]:
     processes: list[multiprocessing.Process] = []
@@ -147,6 +368,7 @@ def _start_worker_processes(
                 "exchange_id_list": exchange_id_list,
                 "max_deal_slots": max_deal_slots,
                 "web_grid_queue": worker_grid_queue,
+                "control_queue": control_queue,
                 "shared_values": shared_values,
             },
             daemon=False,
@@ -178,12 +400,16 @@ def main() -> None:
     shared_values = {"shutdown": multiprocessing.Value('b', False)}
     web_grid_queue: multiprocessing.Queue = multiprocessing.Queue()
     worker_grid_queue: multiprocessing.Queue = multiprocessing.Queue()
+    status_queue: multiprocessing.Queue = multiprocessing.Queue()
+    control_queue: multiprocessing.Queue = multiprocessing.Queue()
     stop_event = threading.Event()
+    ready_event = threading.Event()
 
     _install_signal_handlers(stop_event, shared_values)
 
     web_grid_process = _start_web_grid_process(
         web_grid_queue=web_grid_queue,
+        status_queue=status_queue,
         shared_values=shared_values,
     )
 
@@ -201,19 +427,100 @@ def main() -> None:
     aggregator_thread.start()
 
     process_count = min(calculate_worker_process_count(), 8)
+    status_thread = threading.Thread(
+        target=_status_monitor_loop,
+        kwargs={
+            "control_queue": control_queue,
+            "status_queue": status_queue,
+            "shared_values": shared_values,
+            "stop_event": stop_event,
+            "expected_workers": process_count,
+            "ready_event": ready_event,
+        },
+        daemon=True,
+        name="status-monitor",
+    )
+    status_thread.start()
+    status_queue.put(
+        {
+            "status_event": "summary",
+            "expected_workers": process_count,
+            "started_workers": 0,
+            "ready_workers": 0,
+            "shutdown": False,
+            "ts": time.time(),
+        }
+    )
+
+    if status_thread.is_alive():
+        try:
+            status_queue.put(
+                {
+                    "status_event": "app_state",
+                    "expected_workers": process_count,
+                    "started_workers": 0,
+                    "ready_workers": 0,
+                    "shutdown": False,
+                    "ts": time.time(),
+                }
+            )
+        except Exception:
+            pass
+
     worker_processes = _start_worker_processes(
         process_count=process_count,
         exchange_id_list=EXCHANGE_ID_LIST,
         max_deal_slots=MAX_DEAL_SLOTS,
         worker_grid_queue=worker_grid_queue,
+        control_queue=control_queue,
         shared_values=shared_values,
     )
 
     print(f"Started {len(worker_processes)} arbitrage worker process(es)")
+    _publish_status_message(
+        status_queue,
+        level="info",
+        text=f"Запуск воркеров: {len(worker_processes)}.",
+        source="app",
+    )
+
+    if not ready_event.wait(timeout=WORKER_START_TIMEOUT_SEC):
+        _publish_status_message(
+            status_queue,
+            level="warning",
+            text=f"Не все воркеры подтвердили запуск за {WORKER_START_TIMEOUT_SEC:.0f} сек.",
+            source="app",
+        )
+    else:
+        _publish_status_message(
+            status_queue,
+            level="info",
+            text="Все воркеры подтвердили запуск.",
+            source="app",
+        )
 
     try:
+        worker_alive = {idx: True for idx in range(len(worker_processes))}
         while not stop_event.is_set():
             alive_processes = [process for process in worker_processes if process.is_alive()]
+            for idx, process in enumerate(worker_processes):
+                if worker_alive.get(idx) and not process.is_alive():
+                    worker_alive[idx] = False
+                    status_queue.put(
+                        {
+                            "status_event": "worker_update",
+                            "worker_id": idx,
+                            "state": "dead",
+                            "pid": process.pid,
+                            "ts": time.time(),
+                        }
+                    )
+                    _publish_status_message(
+                        status_queue,
+                        level="error",
+                        text=f"Воркер {idx} завершился (exitcode={process.exitcode}).",
+                        source="app",
+                    )
             if not alive_processes:
                 break
             time.sleep(0.5)
@@ -222,6 +529,7 @@ def main() -> None:
         stop_event.set()
         _stop_processes(worker_processes)
         aggregator_thread.join(timeout=3)
+        status_thread.join(timeout=3)
         web_grid_process.join(timeout=5)
         if web_grid_process.is_alive():
             web_grid_process.terminate()

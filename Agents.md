@@ -8,6 +8,7 @@ Stack:
 - Tkinter GUI
 
 Important architecture:
+- Основная точка входа app.py, от нее и проводи анализ кода.
 - TaskManager управляет открытием и жизнь задач
 - ProcessManager управляет открытием и жизнью процессов
 - Связь между процессами через очереди  multiprocessing.Queue

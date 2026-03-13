@@ -1,4 +1,4 @@
-__version__ = "0.8i"
+__version__ = "0.9i"
 
 """Координация арбитражного потока по символу между несколькими биржами.
 
@@ -1023,7 +1023,10 @@ def _reset_runtime_state(*, web_grid_queue=None, shared_values=None, web_grid_ev
     ArbitrageManager._lock = asyncio.Lock()
 
 
-async def _open_exchange_instances(stack: AsyncExitStack, exchange_id_list: list[str]) -> dict[str, ExchangeInstance]:
+async def _open_exchange_instances(
+    stack: AsyncExitStack,
+    exchange_id_list: list[str],
+) -> tuple[dict[str, ExchangeInstance], list[tuple[str, Exception]]]:
     async def open_exchange(exchange_id: str):
         try:
             exchange = await stack.enter_async_context(ExchangeInstance(ccxt, exchange_id, log=True))
@@ -1047,7 +1050,7 @@ async def _open_exchange_instances(stack: AsyncExitStack, exchange_id_list: list
         for exchange_id, error in failed:
             cprint.warning_r(f"[worker] exchange init failed: {exchange_id}: {error}")
 
-    return exchange_instance_dict
+    return exchange_instance_dict, failed
 
 
 async def _build_swap_data(
@@ -1122,6 +1125,39 @@ async def _wait_for_shared_shutdown(shared_values: dict[str, Any], poll_interval
         await asyncio.sleep(poll_interval_sec)
 
 
+def _send_control_event(control_queue, payload: dict[str, Any]) -> None:
+    if control_queue is None:
+        return
+    try:
+        control_queue.put(payload)
+    except Exception:
+        return
+
+
+async def _worker_heartbeat(
+    *,
+    control_queue,
+    process_index: int,
+    pid: int,
+    shared_values: dict[str, Any],
+    interval_sec: float = 5.0,
+) -> None:
+    while True:
+        shutdown_value = shared_values.get("shutdown")
+        if shutdown_value is not None and shutdown_value.value:
+            return
+        _send_control_event(
+            control_queue,
+            {
+                "event": "worker_heartbeat",
+                "worker_id": process_index,
+                "pid": pid,
+                "ts": time.time(),
+            },
+        )
+        await asyncio.sleep(interval_sec)
+
+
 async def run_arbitrage_worker(
     *,
     process_index: int,
@@ -1129,9 +1165,20 @@ async def run_arbitrage_worker(
     exchange_id_list: list[str],
     max_deal_slots: Decimal,
     web_grid_queue,
+    control_queue,
     shared_values: dict[str, Any],
 ) -> None:
     task_manager = TaskManager()
+    pid = os.getpid()
+    _send_control_event(
+        control_queue,
+        {
+            "event": "worker_started",
+            "worker_id": process_index,
+            "pid": pid,
+            "ts": time.time(),
+        },
+    )
     _reset_runtime_state(
         web_grid_queue=web_grid_queue,
         shared_values=shared_values,
@@ -1142,11 +1189,32 @@ async def run_arbitrage_worker(
 
     try:
         async with AsyncExitStack() as stack:
-            exchange_instance_dict = await _open_exchange_instances(stack, exchange_id_list)
+            heartbeat_task = asyncio.create_task(
+                _worker_heartbeat(
+                    control_queue=control_queue,
+                    process_index=process_index,
+                    pid=pid,
+                    shared_values=shared_values,
+                )
+            )
+            exchange_instance_dict, failed_exchanges = await _open_exchange_instances(stack, exchange_id_list)
             if len(exchange_instance_dict) < 2:
                 cprint.warning_r(
                     f"[worker:{process_index}] not enough exchanges to run arbitrage: "
                     f"{list(exchange_instance_dict.keys())}"
+                )
+                _send_control_event(
+                    control_queue,
+                    {
+                        "event": "worker_inactive",
+                        "worker_id": process_index,
+                        "pid": pid,
+                        "reason": "not enough exchanges",
+                        "exchanges_ok": len(exchange_instance_dict),
+                        "exchanges_failed": len(failed_exchanges),
+                        "symbols_assigned": 0,
+                        "ts": time.time(),
+                    },
                 )
                 await _wait_for_shared_shutdown(shared_values)
                 return
@@ -1180,8 +1248,37 @@ async def run_arbitrage_worker(
                 f"[worker:{process_index}] symbols={len(worker_processed_data_dict)} "
                 f"process_count={process_count}"
             )
+            _send_control_event(
+                control_queue,
+                {
+                    "event": "worker_ready",
+                    "worker_id": process_index,
+                    "pid": pid,
+                    "exchanges_ok": len(exchange_instance_dict),
+                    "exchanges_failed": len(failed_exchanges),
+                    "symbols_assigned": len(worker_processed_data_dict),
+                    "ts": time.time(),
+                },
+            )
             await _wait_for_shared_shutdown(shared_values)
+    except Exception as exc:
+        _send_control_event(
+            control_queue,
+            {
+                "event": "worker_error",
+                "worker_id": process_index,
+                "pid": pid,
+                "text": str(exc),
+                "ts": time.time(),
+            },
+        )
+        raise
     finally:
+        try:
+            if "heartbeat_task" in locals():
+                heartbeat_task.cancel()
+        except Exception:
+            pass
         for balance_manager in BalanceManager.exchange_balance_instance_dict.values():
             balance_manager.enable = False
 
@@ -1198,6 +1295,7 @@ def run_arbitrage_worker_process(
     exchange_id_list: list[str],
     max_deal_slots: Decimal,
     web_grid_queue,
+    control_queue,
     shared_values: dict[str, Any],
 ) -> None:
     asyncio.run(
@@ -1207,6 +1305,7 @@ def run_arbitrage_worker_process(
             exchange_id_list=exchange_id_list,
             max_deal_slots=max_deal_slots,
             web_grid_queue=web_grid_queue,
+            control_queue=control_queue,
             shared_values=shared_values,
         )
     )
