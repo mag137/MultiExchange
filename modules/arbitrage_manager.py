@@ -1146,12 +1146,16 @@ async def _worker_heartbeat(
         shutdown_value = shared_values.get("shutdown")
         if shutdown_value is not None and shutdown_value.value:
             return
+        symbols_active = sum(
+            1 for enabled in ArbitrageManager.symbol_arbitrage_enable_flag_dict.values() if enabled
+        )
         _send_control_event(
             control_queue,
             {
                 "event": "worker_heartbeat",
                 "worker_id": process_index,
                 "pid": pid,
+                "symbols_active": symbols_active,
                 "ts": time.time(),
             },
         )
@@ -1213,6 +1217,7 @@ async def run_arbitrage_worker(
                         "exchanges_ok": len(exchange_instance_dict),
                         "exchanges_failed": len(failed_exchanges),
                         "symbols_assigned": 0,
+                        "symbols_active": 0,
                         "ts": time.time(),
                     },
                 )
@@ -1257,6 +1262,9 @@ async def run_arbitrage_worker(
                     "exchanges_ok": len(exchange_instance_dict),
                     "exchanges_failed": len(failed_exchanges),
                     "symbols_assigned": len(worker_processed_data_dict),
+                    "symbols_active": sum(
+                        1 for enabled in ArbitrageManager.symbol_arbitrage_enable_flag_dict.values() if enabled
+                    ),
                     "ts": time.time(),
                 },
             )

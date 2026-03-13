@@ -283,7 +283,7 @@ STATUS_HTML_TEMPLATE = """<!doctype html>
               <th>Heartbeat</th>
               <th>Exchanges OK</th>
               <th>Exchanges Failed</th>
-              <th>Symbols</th>
+              <th>Активные символы</th>
             </tr>
           </thead>
           <tbody id="workerTableBody">
@@ -360,7 +360,7 @@ STATUS_HTML_TEMPLATE = """<!doctype html>
               <td>${fmtAge(w.last_heartbeat_ts)}</td>
               <td>${w.exchanges_ok ?? '-'}</td>
               <td>${w.exchanges_failed ?? '-'}</td>
-              <td>${w.symbols_assigned ?? '-'}</td>
+              <td>${w.symbols_active ?? '-'}</td>
             </tr>
           `;
         }
@@ -543,6 +543,7 @@ class WebGridSocketPolling:
                     "exchanges_ok",
                     "exchanges_failed",
                     "symbols_assigned",
+                    "symbols_active",
                 ):
                     if key in event:
                         worker[key] = event[key]
@@ -552,6 +553,8 @@ class WebGridSocketPolling:
             if worker_id:
                 worker = self.status_state["workers"].setdefault(worker_id, {})
                 worker["pid"] = event.get("pid", worker.get("pid"))
+                if "symbols_active" in event:
+                    worker["symbols_active"] = event.get("symbols_active")
                 worker["last_heartbeat_ts"] = now_ts
         elif event_type == "summary":
             meta = self.status_state["meta"]
