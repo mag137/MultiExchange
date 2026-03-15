@@ -173,7 +173,6 @@ def _status_monitor_loop(
                     "exchanges_ok": event.get("exchanges_ok"),
                     "exchanges_failed": event.get("exchanges_failed"),
                     "symbols_assigned": event.get("symbols_assigned"),
-                    "symbols_active": event.get("symbols_active"),
                     "ts": time.time(),
                 }
             )
@@ -195,7 +194,6 @@ def _status_monitor_loop(
                     "exchanges_ok": event.get("exchanges_ok"),
                     "exchanges_failed": event.get("exchanges_failed"),
                     "symbols_assigned": event.get("symbols_assigned"),
-                    "symbols_active": event.get("symbols_active"),
                     "ts": time.time(),
                 }
             )
@@ -212,7 +210,6 @@ def _status_monitor_loop(
                     "status_event": "worker_heartbeat",
                     "worker_id": worker_id,
                     "pid": event.get("pid"),
-                    "symbols_active": event.get("symbols_active"),
                     "ts": event.get("ts") or time.time(),
                 }
             )
@@ -429,7 +426,7 @@ def main() -> None:
     )
     aggregator_thread.start()
 
-    process_count = min(calculate_worker_process_count(), 4)
+    process_count = min(calculate_worker_process_count(), 8)
     status_thread = threading.Thread(
         target=_status_monitor_loop,
         kwargs={
